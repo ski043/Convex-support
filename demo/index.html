@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MarshalDesk widget demo host</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #f4f1e9;
+        color: #24231f;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        width: min(680px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 64px 0 120px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: clamp(2rem, 7vw, 4.5rem);
+        line-height: 0.95;
+        letter-spacing: -0.05em;
+      }
+
+      p {
+        max-width: 60ch;
+        line-height: 1.6;
+      }
+
+      .notice {
+        margin: 32px 0;
+        padding: 16px;
+        border: 1px solid #d1cbbb;
+        border-radius: 12px;
+        background: #fffdf7;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 650;
+      }
+
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 120px;
+        padding: 12px;
+        resize: vertical;
+        border: 1px solid #aaa391;
+        border-radius: 10px;
+        background: #fff;
+        color: #24231f;
+        font: 0.875rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      button {
+        margin-top: 12px;
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 9px;
+        background: #24231f;
+        color: #fff;
+        font: inherit;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      #status {
+        min-height: 1.5em;
+        margin-top: 10px;
+        font-size: 0.875rem;
+      }
+
+      .host-card {
+        margin-top: 48px;
+        padding: 24px;
+        border: 1px solid #d1cbbb;
+        border-radius: 18px;
+        background: #e9e4d8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><strong>Development/demo only</strong></p>
+      <h1>Ordinary host page</h1>
+      <p>
+        This static page runs on a separate origin so the widget’s host cookie,
+        iframe isolation, responsive sizing, and page-context updates can be
+        tested exactly as they will be on a customer site.
+      </p>
+
+      <div class="notice">
+        <p>
+          Start MarshalDesk, then serve this directory separately with
+          <code>npx serve demo -l 3333</code>. Copy the actual snippet from the
+          dashboard, paste it below, and install it.
+        </p>
+      </div>
+
+      <form id="installer">
+        <label for="snippet">Widget snippet</label>
+        <textarea
+          id="snippet"
+          spellcheck="false"
+          placeholder="&lt;script src=&quot;http://localhost:3000/widget.js&quot; data-workspace=&quot;…&quot; async&gt;&lt;/script&gt;"
+        ></textarea>
+        <button id="install" type="submit">Install snippet</button>
+        <p id="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <section class="host-card" aria-labelledby="host-controls-title">
+        <h2 id="host-controls-title">Host controls remain independent</h2>
+        <p>
+          The iframe covers only the launcher or open panel. Everything else on
+          this page should remain clickable.
+        </p>
+        <button type="button" onclick="this.textContent = 'Host button works'">
+          Test host button
+        </button>
+      </section>
+    </main>
+
+    <script>
+      (function () {
+        "use strict";
+
+        var form = document.getElementById("installer");
+        var textarea = document.getElementById("snippet");
+        var button = document.getElementById("install");
+        var status = document.getElementById("status");
+
+        form.addEventListener("submit", function (event) {
+          event.preventDefault();
+          status.textContent = "";
+
+          var parsed = new DOMParser().parseFromString(textarea.value, "text/html");
+          var scripts = parsed.querySelectorAll("script");
+          var source = scripts.length === 1 ? scripts[0] : null;
+          if (!source || source.textContent.trim()) {
+            status.textContent = "Paste one external script tag with no inline code.";
+            return;
+          }
+
+          var src = source.getAttribute("src");
+          var workspace = source.getAttribute("data-workspace");
+          if (!src || !workspace || !source.hasAttribute("async")) {
+            status.textContent = "The snippet needs src, data-workspace, and async attributes.";
+            return;
+          }
+
+          var url;
+          try {
+            url = new URL(src);
+          } catch (_) {
+            status.textContent = "The widget src must be an absolute URL.";
+            return;
+          }
+          if (
+            (url.protocol !== "http:" && url.protocol !== "https:") ||
+            url.pathname.slice(-10) !== "/widget.js"
+          ) {
+            status.textContent = "The widget src must be an http(s) /widget.js URL.";
+            return;
+          }
+
+          var loader = document.createElement("script");
+          loader.src = url.href;
+          loader.setAttribute("data-workspace", workspace);
+          loader.async = true;
+          loader.addEventListener("load", function () {
+            status.textContent = "Snippet installed. Open the launcher in the page corner.";
+          });
+          loader.addEventListener("error", function () {
+            status.textContent = "The loader could not be fetched. Check the app URL and dev server.";
+            button.disabled = false;
+          });
+          localStorage.setItem("marshaldesk-demo-snippet", textarea.value);
+          document.head.appendChild(loader);
+          button.disabled = true;
+          status.textContent = "Loading widget…";
+        });
+
+        var savedSnippet = localStorage.getItem("marshaldesk-demo-snippet");
+        if (savedSnippet) {
+          textarea.value = savedSnippet;
+          form.requestSubmit();
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Almarai, Instrument_Serif } from "next/font/google";
+import { Almarai, Geist_Mono, Instrument_Serif } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 import { ConvexClientProvider } from "./ConvexClientProvider";
@@ -17,6 +17,11 @@ const instrumentSerif = Instrument_Serif({
   subsets: ["latin"],
 });
 
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
 export const metadata: Metadata = {
   title: "MarshalDesk — Grounded support, live handoffs",
   description:
@@ -28,13 +33,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${almarai.variable} ${instrumentSerif.variable} h-full antialiased`}
+      className={`dark ${almarai.variable} ${geistMono.variable} ${instrumentSerif.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col">
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
-          enableSystem
+          defaultTheme="dark"
+          forcedTheme="dark"
+          enableSystem={false}
           disableTransitionOnChange
         >
           <ConvexClientProvider>{children}</ConvexClientProvider>

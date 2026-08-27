@@ -9,8 +9,18 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as chatModel from "../chatModel.js";
+import type * as chatOwner from "../chatOwner.js";
+import type * as chatValidators from "../chatValidators.js";
 import type * as health from "../health.js";
 import type * as http from "../http.js";
+import type * as inbox from "../inbox.js";
+import type * as typingPresence from "../typingPresence.js";
+import type * as widgetChat from "../widgetChat.js";
+import type * as widgetChatInternal from "../widgetChatInternal.js";
+import type * as widgetSettings from "../widgetSettings.js";
+import type * as workspaceModel from "../workspaceModel.js";
+import type * as workspaces from "../workspaces.js";
 
 import type {
   ApiFromModules,
@@ -20,8 +30,18 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  chatModel: typeof chatModel;
+  chatOwner: typeof chatOwner;
+  chatValidators: typeof chatValidators;
   health: typeof health;
   http: typeof http;
+  inbox: typeof inbox;
+  typingPresence: typeof typingPresence;
+  widgetChat: typeof widgetChat;
+  widgetChatInternal: typeof widgetChatInternal;
+  widgetSettings: typeof widgetSettings;
+  workspaceModel: typeof workspaceModel;
+  workspaces: typeof workspaces;
 }>;
 
 /**
@@ -52,4 +72,5 @@ export declare const internal: FilterApi<
 
 export declare const components: {
   betterAuth: import("@convex-dev/better-auth/_generated/component.js").ComponentApi<"betterAuth">;
+  presence: import("@convex-dev/presence/_generated/component.js").ComponentApi<"presence">;
 };

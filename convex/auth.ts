@@ -1,13 +1,31 @@
-import { createClient, type GenericCtx } from "@convex-dev/better-auth";
+import {
+  createClient,
+  type AuthFunctions,
+  type GenericCtx,
+} from "@convex-dev/better-auth";
 import { convex } from "@convex-dev/better-auth/plugins";
 import { betterAuth } from "better-auth/minimal";
 import { v } from "convex/values";
-import { components } from "./_generated/api";
+import { components, internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
 import { env, query } from "./_generated/server";
 import authConfig from "./auth.config";
+import { ensureWorkspaceForAuthUser } from "./workspaceModel";
 
-export const authComponent = createClient<DataModel>(components.betterAuth);
+const authFunctions: AuthFunctions = internal.auth;
+
+export const authComponent = createClient<DataModel>(components.betterAuth, {
+  authFunctions,
+  triggers: {
+    user: {
+      onCreate: async (ctx, authUser) => {
+        await ensureWorkspaceForAuthUser(ctx, authUser);
+      },
+    },
+  },
+});
+
+export const { onCreate, onUpdate, onDelete } = authComponent.triggersApi();
 
 export function createAuth(ctx: GenericCtx<DataModel>) {
   return betterAuth({
