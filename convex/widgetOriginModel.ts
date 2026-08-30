@@ -24,11 +24,6 @@ export async function recordWidgetOriginObservation(
     return;
   }
 
-  // A resumed capability is not a new session bootstrap. If its observation
-  // was cleared while the session remained valid, wait for a genuinely new
-  // session before recreating the row.
-  if (!countSession) return;
-
   const retained = await ctx.db
     .query("widgetOriginObservations")
     .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
@@ -41,7 +36,9 @@ export async function recordWidgetOriginObservation(
   await ctx.db.insert("widgetOriginObservations", {
     workspaceId,
     origin,
-    sessionCount: 1,
+    // A resumed capability can rediscover a cleared origin, but it is not a
+    // new session bootstrap and must not inflate that metric.
+    sessionCount: countSession ? 1 : 0,
     firstSeenAt: now,
     lastSeenAt: now,
   });

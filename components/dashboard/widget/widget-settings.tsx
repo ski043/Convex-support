@@ -110,6 +110,11 @@ function formatObservationTimestamp(timestamp: number) {
   return `${observationTimestampFormatter.format(new Date(timestamp))} UTC`;
 }
 
+function formatObservationActivity(sessionCount: number) {
+  if (sessionCount === 0) return "Observed during capability resume";
+  return `${sessionCount} new session bootstrap${sessionCount === 1 ? "" : "s"}`;
+}
+
 function highlightSnippetPart(part: string, index: number) {
   if (part === "<" || part === ">" || part === "</") {
     return (
@@ -374,8 +379,7 @@ function OriginSecuritySettings({
                           {observation.origin}
                         </span>
                         <span className="block text-[11px] text-muted-foreground">
-                          {observation.sessionCount} session bootstrap
-                          {observation.sessionCount === 1 ? "" : "s"} · first{" "}
+                          {formatObservationActivity(observation.sessionCount)} · first{" "}
                           {formatObservationTimestamp(observation.firstSeenAt)} · last{" "}
                           {formatObservationTimestamp(observation.lastSeenAt)}
                         </span>
