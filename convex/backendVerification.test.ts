@@ -1082,16 +1082,21 @@ describe("widget origin enforcement guidance", () => {
       ).isAtCapacity,
     ).toBe(true);
 
-    expect(
-      await t.run(async (ctx) =>
-        ctx.db
-          .query("widgetOriginObservations")
-          .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
-            q.eq("workspaceId", workspaceId),
-          )
-          .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 1),
-      ),
-    ).toHaveLength(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
+    const retained = await t.run(async (ctx) =>
+      ctx.db
+        .query("widgetOriginObservations")
+        .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+          q.eq("workspaceId", workspaceId),
+        )
+        .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 1),
+    );
+    expect(retained).toHaveLength(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
+    expect(retained.map((observation) => observation.origin)).not.toContain(
+      "https://bounded-0.example.com",
+    );
+    expect(retained.map((observation) => observation.origin)).toContain(
+      `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE}.example.com`,
+    );
 
     await t.run(async (ctx) =>
       clearWidgetOriginObservations(ctx, workspaceId),

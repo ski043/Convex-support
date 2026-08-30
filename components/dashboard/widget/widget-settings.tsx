@@ -395,9 +395,9 @@ function OriginSecuritySettings({
                 </FieldDescription>
                 {recentOriginState?.isAtCapacity ? (
                   <FieldDescription className="text-destructive">
-                    The 100-origin safety cap has been reached, so additional
-                    origins are not recorded. Verify your configuration or restart
-                    discovery to clear this unverified history.
+                    The rolling 100-origin safety window is full. A new origin
+                    replaces the least-recently-seen value, so verify your
+                    configuration before enforcing this unverified history.
                   </FieldDescription>
                 ) : recentOriginState?.isTruncated ? (
                   <FieldDescription className="text-destructive">

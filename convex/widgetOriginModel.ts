@@ -17,8 +17,12 @@ export async function recordWidgetOriginObservation(
     )
     .unique();
   if (existing) {
+    // Resumes can recreate a row after an owner clears discovery, but they do
+    // not refresh an existing row's display recency without a rate-limited
+    // new-session bootstrap.
+    if (!countSession) return;
     await ctx.db.patch("widgetOriginObservations", existing._id, {
-      ...(countSession ? { sessionCount: existing.sessionCount + 1 } : {}),
+      sessionCount: existing.sessionCount + 1,
       lastSeenAt: now,
     });
     return;
@@ -31,7 +35,12 @@ export async function recordWidgetOriginObservation(
     )
     .order("desc")
     .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
-  if (retained.length >= MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE) return;
+  if (retained.length >= MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE) {
+    const oldest = retained.at(-1);
+    if (oldest) {
+      await ctx.db.delete("widgetOriginObservations", oldest._id);
+    }
+  }
 
   await ctx.db.insert("widgetOriginObservations", {
     workspaceId,

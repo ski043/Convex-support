@@ -63,6 +63,13 @@ const widgetRateLimiter = new RateLimiter(components.rateLimiter, {
     capacity: 500,
     shards: 10,
   },
+  widgetOriginRediscovery: {
+    kind: "fixed window",
+    rate: 20,
+    period: DAY,
+    capacity: 20,
+    start: 0,
+  },
   visitorMessageBurst: {
     kind: "token bucket",
     rate: 12,
@@ -188,13 +195,30 @@ export const ensureSession = mutation({
         capabilityExpiresAt,
         capabilityExpired: false,
       });
-      await recordWidgetOriginObservation(
-        ctx,
-        args.workspaceId,
-        claims.origin,
-        now,
-        false,
-      );
+      const existingObservation = await ctx.db
+        .query("widgetOriginObservations")
+        .withIndex("by_workspaceId_and_origin", (q) =>
+          q
+            .eq("workspaceId", args.workspaceId)
+            .eq("origin", claims.origin),
+        )
+        .unique();
+      if (!existingObservation) {
+        const rediscoveryLimit = await widgetRateLimiter.limit(
+          ctx,
+          "widgetOriginRediscovery",
+          { key: args.workspaceId },
+        );
+        if (rediscoveryLimit.ok) {
+          await recordWidgetOriginObservation(
+            ctx,
+            args.workspaceId,
+            claims.origin,
+            now,
+            false,
+          );
+        }
+      }
       await ctx.scheduler.runAt(
         Math.min(capabilityExpiresAt, now + CAPABILITY_EXPIRY_SCHEDULE_STEP_MS),
         expireCapabilityReference,
