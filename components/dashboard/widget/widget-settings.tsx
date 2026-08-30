@@ -177,9 +177,11 @@ function ownerSafeError(error: unknown, fallback: string) {
 function OriginSecuritySettings({
   initialOrigins,
   initialPolicy,
+  hasResolvedSecurity,
 }: {
   initialOrigins: string[];
   initialPolicy: OriginPolicy;
+  hasResolvedSecurity: boolean;
 }) {
   const saveSecurity = useMutation(api.widgetSettings.saveSecurity);
   const restartSecuritySetup = useMutation(
@@ -200,6 +202,10 @@ function OriginSecuritySettings({
   const [policy, setPolicy] = useState<OriginPolicy>(initialPolicy);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [lastSavedSecurity, setLastSavedSecurity] = useState<{
+    originsKey: string;
+    policy: OriginPolicy;
+  } | null>(null);
   const [restartStep, setRestartStep] = useState<
     "idle" | "confirming" | "saving" | "error"
   >("idle");
@@ -215,6 +221,13 @@ function OriginSecuritySettings({
     policy: OriginPolicy;
   } | null>(null);
   const editRevision = useRef(0);
+  const visibleSaveStatus =
+    saveStatus === "saved" &&
+    (!hasResolvedSecurity ||
+      lastSavedSecurity?.originsKey !== serverOriginsKey ||
+      lastSavedSecurity?.policy !== initialPolicy)
+      ? "idle"
+      : saveStatus;
 
   function draftsForValues(current: OriginDraft[], values: string[]) {
     const displayValues = values.length > 0 ? values : [""];
@@ -231,6 +244,8 @@ function OriginSecuritySettings({
   }
 
   useEffect(() => {
+    if (!hasResolvedSecurity) return;
+
     const previousSecurity = lastServerSecurity.current;
     if (
       previousSecurity.originsKey === serverOriginsKey &&
@@ -267,7 +282,11 @@ function OriginSecuritySettings({
       originsKey: serverOriginsKey,
       policy: initialPolicy,
     };
-  }, [initialPolicy, serverOriginsKey]);
+  }, [
+    hasResolvedSecurity,
+    initialPolicy,
+    serverOriginsKey,
+  ]);
 
   function markEdited() {
     editRevision.current += 1;
@@ -342,6 +361,7 @@ function OriginSecuritySettings({
         allowedOrigins,
       });
       lastServerSecurity.current = submittedSecurity;
+      setLastSavedSecurity(submittedSecurity);
       setOrigins((current) =>
         current.length === submittedOrigins.length &&
         current.every(
@@ -419,7 +439,7 @@ function OriginSecuritySettings({
               const inputId = `widget-${origin.id}`;
 
               return (
-                <Field key={origin.id} data-invalid={saveStatus === "error"}>
+                <Field key={origin.id} data-invalid={visibleSaveStatus === "error"}>
                   <FieldLabel htmlFor={inputId}>
                     {index === 0 ? "Website origin" : `Website origin ${index + 1}`}
                   </FieldLabel>
@@ -429,7 +449,7 @@ function OriginSecuritySettings({
                       name={`widget-origin-${index}`}
                       className="h-10 font-mono text-sm sm:h-8"
                       value={origin.value}
-                      aria-invalid={saveStatus === "error"}
+                      aria-invalid={visibleSaveStatus === "error"}
                       autoCapitalize="none"
                       autoComplete="url"
                       inputMode="url"
@@ -598,7 +618,7 @@ function OriginSecuritySettings({
               type="button"
               variant="outline"
               className="h-10 sm:h-8"
-              disabled={origins.length >= 20 || saveStatus === "saving"}
+              disabled={origins.length >= 20 || visibleSaveStatus === "saving"}
               onClick={addOrigin}
             >
               <PlusIcon data-icon="inline-start" />
@@ -608,17 +628,17 @@ function OriginSecuritySettings({
               <p
                 className={cn(
                   "text-xs text-muted-foreground",
-                  saveStatus === "saved" && "text-[var(--status-open)]",
-                  saveStatus === "error" && "text-destructive",
+                  visibleSaveStatus === "saved" && "text-[var(--status-open)]",
+                  visibleSaveStatus === "error" && "text-destructive",
                 )}
                 aria-live="polite"
                 aria-atomic="true"
               >
-                {saveStatus === "saving"
+                {visibleSaveStatus === "saving"
                   ? "Validating and saving…"
-                  : saveStatus === "saved"
+                  : visibleSaveStatus === "saved"
                     ? "Origins saved and enforced."
-                    : saveStatus === "error"
+                    : visibleSaveStatus === "error"
                       ? "Origins were not saved."
                       : policy === "legacy_limited"
                         ? "Saving immediately enables enforcement for this exact list."
@@ -627,11 +647,11 @@ function OriginSecuritySettings({
               <Button
                 type="submit"
                 className="h-10 sm:h-8"
-                disabled={saveStatus === "saving"}
+                disabled={visibleSaveStatus === "saving"}
               >
-                {saveStatus === "saving" ? (
+                {visibleSaveStatus === "saving" ? (
                   <Spinner data-icon="inline-start" />
-                ) : saveStatus === "saved" ? (
+                ) : visibleSaveStatus === "saved" ? (
                   <CheckIcon data-icon="inline-start" />
                 ) : (
                   <Globe2Icon data-icon="inline-start" />
@@ -774,7 +794,8 @@ export function WidgetSettings({
   const initialSettings =
     usePreloadedAuthQuery(preloadedSettings) ?? defaultWidgetSettings;
   const workspace = usePreloadedAuthQuery(preloadedWorkspace);
-  const security = usePreloadedAuthQuery(preloadedSecurity) ?? {
+  const securityState = usePreloadedAuthQuery(preloadedSecurity);
+  const security = securityState ?? {
     allowedOrigins: [],
     originPolicy: "legacy_limited" as const,
   };
@@ -1071,6 +1092,7 @@ export function WidgetSettings({
           <OriginSecuritySettings
             initialOrigins={security.allowedOrigins}
             initialPolicy={security.originPolicy}
+            hasResolvedSecurity={securityState !== undefined}
           />
 
           <Card className="gap-0 py-0">

@@ -60,7 +60,9 @@ export function AiSettingsCard({
 }: {
   preloadedSettings: Preloaded<typeof api.aiAutomation.getAiSettings>;
 }) {
-  const initialSettings = usePreloadedAuthQuery(preloadedSettings) ?? {
+  const settingsState = usePreloadedAuthQuery(preloadedSettings);
+  const hasResolvedSettings = settingsState !== undefined;
+  const initialSettings = settingsState ?? {
     enabled: false,
     globalAvailable: true,
     effectiveEnabled: false,
@@ -74,6 +76,10 @@ export function AiSettingsCard({
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [lastSavedSettings, setLastSavedSettings] = useState<{
+    enabled: boolean;
+    handoffMessage: string;
+  } | null>(null);
   const lastServerSettings = useRef({
     enabled: initialSettings.enabled,
     handoffMessage: initialSettings.handoffMessage,
@@ -85,8 +91,17 @@ export function AiSettingsCard({
   const editRevision = useRef(0);
   const enabledButUnavailable =
     initialSettings.enabled && !initialSettings.globalAvailable;
+  const visibleSaveStatus =
+    saveStatus === "saved" &&
+    (!hasResolvedSettings ||
+      lastSavedSettings?.enabled !== initialSettings.enabled ||
+      lastSavedSettings?.handoffMessage !== initialSettings.handoffMessage)
+      ? "idle"
+      : saveStatus;
 
   useEffect(() => {
+    if (!hasResolvedSettings) return;
+
     const previousSettings = lastServerSettings.current;
     const pendingSettings = pendingServerSettings.current;
     const previousEnabled = saveAwareServerBaseline(
@@ -118,7 +133,11 @@ export function AiSettingsCard({
       enabled: initialSettings.enabled,
       handoffMessage: initialSettings.handoffMessage,
     };
-  }, [initialSettings.enabled, initialSettings.handoffMessage]);
+  }, [
+    hasResolvedSettings,
+    initialSettings.enabled,
+    initialSettings.handoffMessage,
+  ]);
 
   function markEdited() {
     editRevision.current += 1;
@@ -146,6 +165,7 @@ export function AiSettingsCard({
     try {
       await configureAi(submittedSettings);
       lastServerSettings.current = submittedSettings;
+      setLastSavedSettings(submittedSettings);
       setHandoffMessage((current) =>
         current === handoffMessage
           ? submittedSettings.handoffMessage
@@ -227,7 +247,7 @@ export function AiSettingsCard({
               </FieldDescription>
             </FieldSet>
 
-            <Field data-invalid={saveStatus === "error"}>
+            <Field data-invalid={visibleSaveStatus === "error"}>
               <FieldLabel htmlFor="ai-handoff-message">Customer handoff message</FieldLabel>
               <Textarea
                 id="ai-handoff-message"
@@ -236,7 +256,7 @@ export function AiSettingsCard({
                 value={handoffMessage}
                 maxLength={4000}
                 rows={3}
-                aria-invalid={saveStatus === "error"}
+                aria-invalid={visibleSaveStatus === "error"}
                 onChange={(event) => {
                   setHandoffMessage(event.target.value);
                   markEdited();
@@ -270,22 +290,22 @@ export function AiSettingsCard({
               <p
                 className={cn(
                   "text-xs text-muted-foreground",
-                  saveStatus === "saved" && "text-[var(--status-open)]",
-                  saveStatus === "error" && "text-destructive",
+                  visibleSaveStatus === "saved" && "text-[var(--status-open)]",
+                  visibleSaveStatus === "error" && "text-destructive",
                 )}
                 aria-live="polite"
                 aria-atomic="true"
               >
-                {saveStatus === "saving"
+                {visibleSaveStatus === "saving"
                   ? "Saving…"
-                  : saveStatus === "saved"
+                  : visibleSaveStatus === "saved"
                     ? "AI settings saved."
-                    : saveStatus === "error"
+                    : visibleSaveStatus === "error"
                       ? "Settings were not saved."
                       : "Changes apply after you save."}
               </p>
-              <Button type="submit" disabled={saveStatus === "saving"}>
-                {saveStatus === "saving" ? (
+              <Button type="submit" disabled={visibleSaveStatus === "saving"}>
+                {visibleSaveStatus === "saving" ? (
                   <Spinner data-icon="inline-start" />
                 ) : (
                   <CheckIcon data-icon="inline-start" />
