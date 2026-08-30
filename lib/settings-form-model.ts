@@ -8,6 +8,17 @@ export function syncUntouchedValue<Value>(
     : currentValue;
 }
 
+export function saveAwareServerBaseline<Value>(
+  previousServerValue: Value,
+  nextServerValue: Value,
+  pendingServerValue: Value | undefined,
+) {
+  return pendingServerValue !== undefined &&
+    Object.is(nextServerValue, pendingServerValue)
+    ? pendingServerValue
+    : previousServerValue;
+}
+
 export function normalizeNonEmptyValues(values: string[]) {
   const normalized = new Set<string>();
   for (const value of values) {

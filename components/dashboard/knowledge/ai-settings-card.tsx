@@ -34,7 +34,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/convex/_generated/api";
-import { syncUntouchedValue } from "@/lib/settings-form-model";
+import {
+  saveAwareServerBaseline,
+  syncUntouchedValue,
+} from "@/lib/settings-form-model";
 import { cn } from "@/lib/utils";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -75,23 +78,39 @@ export function AiSettingsCard({
     enabled: initialSettings.enabled,
     handoffMessage: initialSettings.handoffMessage,
   });
+  const pendingServerSettings = useRef<{
+    enabled: boolean;
+    handoffMessage: string;
+  } | null>(null);
+  const editRevision = useRef(0);
   const enabledButUnavailable =
     initialSettings.enabled && !initialSettings.globalAvailable;
 
   useEffect(() => {
     const previousSettings = lastServerSettings.current;
+    const pendingSettings = pendingServerSettings.current;
+    const previousEnabled = saveAwareServerBaseline(
+      previousSettings.enabled,
+      initialSettings.enabled,
+      pendingSettings?.enabled,
+    );
+    const previousHandoffMessage = saveAwareServerBaseline(
+      previousSettings.handoffMessage,
+      initialSettings.handoffMessage,
+      pendingSettings?.handoffMessage,
+    );
 
     setEnabled((current) =>
       syncUntouchedValue(
         current,
-        previousSettings.enabled,
+        previousEnabled,
         initialSettings.enabled,
       ),
     );
     setHandoffMessage((current) =>
       syncUntouchedValue(
         current,
-        previousSettings.handoffMessage,
+        previousHandoffMessage,
         initialSettings.handoffMessage,
       ),
     );
@@ -101,25 +120,51 @@ export function AiSettingsCard({
     };
   }, [initialSettings.enabled, initialSettings.handoffMessage]);
 
+  function markEdited() {
+    editRevision.current += 1;
+    setSaveStatus((current) => (current === "saving" ? current : "idle"));
+    setSaveError(null);
+  }
+
   function updateEnabled(nextEnabled: boolean) {
     setEnabled(nextEnabled);
-    setSaveStatus("idle");
-    setSaveError(null);
+    markEdited();
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saveStatus === "saving") return;
 
+    const submittedRevision = editRevision.current;
+    const submittedSettings = {
+      enabled,
+      handoffMessage: handoffMessage.trim(),
+    };
+    pendingServerSettings.current = submittedSettings;
     setSaveStatus("saving");
     setSaveError(null);
     try {
-      await configureAi({ enabled, handoffMessage });
-      setHandoffMessage((current) => current.trim());
-      setSaveStatus("saved");
+      await configureAi(submittedSettings);
+      lastServerSettings.current = submittedSettings;
+      setHandoffMessage((current) =>
+        current === handoffMessage
+          ? submittedSettings.handoffMessage
+          : current,
+      );
+      setSaveStatus(
+        editRevision.current === submittedRevision ? "saved" : "idle",
+      );
     } catch (error) {
-      setSaveStatus("error");
-      setSaveError(settingsErrorMessage(error));
+      if (editRevision.current === submittedRevision) {
+        setSaveStatus("error");
+        setSaveError(settingsErrorMessage(error));
+      } else {
+        setSaveStatus("idle");
+      }
+    } finally {
+      if (pendingServerSettings.current === submittedSettings) {
+        pendingServerSettings.current = null;
+      }
     }
   }
 
@@ -194,8 +239,7 @@ export function AiSettingsCard({
                 aria-invalid={saveStatus === "error"}
                 onChange={(event) => {
                   setHandoffMessage(event.target.value);
-                  setSaveStatus("idle");
-                  setSaveError(null);
+                  markEdited();
                 }}
               />
               <FieldDescription>

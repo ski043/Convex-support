@@ -58,6 +58,7 @@ import {
 import {
   normalizeNonEmptyValues,
   normalizedValuesEqual,
+  saveAwareServerBaseline,
   syncUntouchedValue,
   widgetOriginObservationWarnings,
 } from "@/lib/settings-form-model";
@@ -209,6 +210,11 @@ function OriginSecuritySettings({
     originsKey: serverOriginsKey,
     policy: initialPolicy,
   });
+  const pendingServerSecurity = useRef<{
+    originsKey: string;
+    policy: OriginPolicy;
+  } | null>(null);
+  const editRevision = useRef(0);
 
   function draftsForValues(current: OriginDraft[], values: string[]) {
     const displayValues = values.length > 0 ? values : [""];
@@ -233,7 +239,18 @@ function OriginSecuritySettings({
       return;
     }
 
-    const previousOrigins = JSON.parse(previousSecurity.originsKey) as string[];
+    const pendingSecurity = pendingServerSecurity.current;
+    const previousOriginsKey = saveAwareServerBaseline(
+      previousSecurity.originsKey,
+      serverOriginsKey,
+      pendingSecurity?.originsKey,
+    );
+    const previousPolicy = saveAwareServerBaseline(
+      previousSecurity.policy,
+      initialPolicy,
+      pendingSecurity?.policy,
+    );
+    const previousOrigins = JSON.parse(previousOriginsKey) as string[];
     const nextOrigins = JSON.parse(serverOriginsKey) as string[];
     setOrigins((current) =>
       normalizedValuesEqual(
@@ -244,7 +261,7 @@ function OriginSecuritySettings({
         : current,
     );
     setPolicy((current) =>
-      syncUntouchedValue(current, previousSecurity.policy, initialPolicy),
+      syncUntouchedValue(current, previousPolicy, initialPolicy),
     );
     lastServerSecurity.current = {
       originsKey: serverOriginsKey,
@@ -252,14 +269,19 @@ function OriginSecuritySettings({
     };
   }, [initialPolicy, serverOriginsKey]);
 
+  function markEdited() {
+    editRevision.current += 1;
+    setSaveStatus((current) => (current === "saving" ? current : "idle"));
+    setSaveError(null);
+  }
+
   function updateOrigin(id: string, value: string) {
     setOrigins((current) =>
       current.map((origin) =>
         origin.id === id ? { ...origin, value } : origin,
       ),
     );
-    setSaveStatus("idle");
-    setSaveError(null);
+    markEdited();
   }
 
   function addOrigin() {
@@ -270,8 +292,7 @@ function OriginSecuritySettings({
         ? current
         : [...current, { id, value: "" }],
     );
-    setSaveStatus("idle");
-    setSaveError(null);
+    markEdited();
   }
 
   function removeOrigin(id: string) {
@@ -279,8 +300,7 @@ function OriginSecuritySettings({
       if (current.length === 1) return [{ ...current[0], value: "" }];
       return current.filter((origin) => origin.id !== id);
     });
-    setSaveStatus("idle");
-    setSaveError(null);
+    markEdited();
   }
 
   function addRecentOrigin(value: string) {
@@ -297,35 +317,63 @@ function OriginSecuritySettings({
       if (current.length >= 20) return current;
       return [...current, { id, value }];
     });
-    setSaveStatus("idle");
-    setSaveError(null);
+    markEdited();
   }
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saveStatus === "saving") return;
 
+    const submittedRevision = editRevision.current;
+    const submittedOrigins = origins.map((origin) => ({ ...origin }));
+    const allowedOrigins = normalizeNonEmptyValues(
+      submittedOrigins.map((origin) => origin.value),
+    );
+    const submittedSecurity = {
+      originsKey: JSON.stringify(allowedOrigins),
+      policy: "enforced" as const,
+    };
+    pendingServerSecurity.current = submittedSecurity;
     setSaveStatus("saving");
     setSaveError(null);
 
     try {
-      const allowedOrigins = normalizeNonEmptyValues(
-        origins.map((origin) => origin.value),
-      );
       await saveSecurity({
         allowedOrigins,
       });
-      setOrigins((current) => draftsForValues(current, allowedOrigins));
-      setPolicy("enforced");
-      setSaveStatus("saved");
-    } catch (error) {
-      setSaveStatus("error");
-      setSaveError(
-        ownerSafeError(
-          error,
-          "We couldn’t save these origins. Check each exact origin and try again.",
-        ),
+      lastServerSecurity.current = submittedSecurity;
+      setOrigins((current) =>
+        current.length === submittedOrigins.length &&
+        current.every(
+          (origin, index) =>
+            origin.id === submittedOrigins[index]?.id &&
+            origin.value === submittedOrigins[index]?.value,
+        )
+          ? draftsForValues(current, allowedOrigins)
+          : current,
       );
+      setPolicy((current) =>
+        current === policy ? submittedSecurity.policy : current,
+      );
+      setSaveStatus(
+        editRevision.current === submittedRevision ? "saved" : "idle",
+      );
+    } catch (error) {
+      if (editRevision.current === submittedRevision) {
+        setSaveStatus("error");
+        setSaveError(
+          ownerSafeError(
+            error,
+            "We couldn’t save these origins. Check each exact origin and try again.",
+          ),
+        );
+      } else {
+        setSaveStatus("idle");
+      }
+    } finally {
+      if (pendingServerSecurity.current === submittedSecurity) {
+        pendingServerSecurity.current = null;
+      }
     }
   }
 
