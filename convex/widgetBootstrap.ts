@@ -1,8 +1,9 @@
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { query } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
 import { normalizeWidgetOrigin } from "../lib/widget-bootstrap-token";
+import { findVisitorByCapability } from "./chatModel";
 
 export async function getWidgetOriginPolicy(
   ctx: QueryCtx | MutationCtx,
@@ -43,6 +44,47 @@ export const getPolicy = query({
   handler: async (ctx, args) => {
     const policy = await getWidgetOriginPolicy(ctx, args.workspaceId, args.origin);
     if (!policy) return null;
+    return {
+      allowed: policy.allowed,
+      mode: policy.mode,
+      policyVersion: policy.policyVersion,
+    };
+  },
+});
+
+export const getRenewalPolicy = mutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    capabilityToken: v.string(),
+    origin: v.string(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      allowed: v.boolean(),
+      mode: v.union(v.literal("legacy_limited"), v.literal("enforced")),
+      policyVersion: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const origin = normalizeWidgetOrigin(args.origin);
+    if (!origin) return null;
+    const visitor = await findVisitorByCapability(
+      ctx,
+      args.workspaceId,
+      args.capabilityToken,
+    );
+    const now = Date.now();
+    if (
+      !visitor ||
+      visitor.capabilityExpired ||
+      visitor.capabilityExpiresAt <= now ||
+      visitor.origin !== origin
+    ) {
+      return null;
+    }
+    const policy = await getWidgetOriginPolicy(ctx, args.workspaceId, origin);
+    if (!policy?.allowed) return null;
     return {
       allowed: policy.allowed,
       mode: policy.mode,

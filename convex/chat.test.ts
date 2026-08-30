@@ -61,6 +61,16 @@ const ensureSession = makeFunctionReference<
   { token: string }
 >("widgetChat:ensureSession");
 
+const getBootstrapRenewalPolicy = makeFunctionReference<
+  "mutation",
+  { workspaceId: WorkspaceId; capabilityToken: string; origin: string },
+  null | {
+    allowed: boolean;
+    mode: "legacy_limited" | "enforced";
+    policyVersion: number;
+  }
+>("widgetBootstrap:getRenewalPolicy");
+
 const updateContext = makeFunctionReference<
   "mutation",
   { workspaceId: WorkspaceId; token: string; context: ContextInput },
@@ -259,6 +269,48 @@ async function firstConversation(t: TestBackend, workspaceId: WorkspaceId) {
 }
 
 describe("visitor sessions and isolation", () => {
+  test("bootstrap renewal is limited to a live capability's bound origin", async () => {
+    const t = makeTestBackend();
+    const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
+    const session = await createVisitor(t, workspaceId);
+
+    await expect(
+      t.mutation(getBootstrapRenewalPolicy, {
+        workspaceId,
+        capabilityToken: session.token,
+        origin: TEST_WIDGET_ORIGIN,
+      }),
+    ).resolves.toMatchObject({ allowed: true, mode: "legacy_limited" });
+    await expect(
+      t.mutation(getBootstrapRenewalPolicy, {
+        workspaceId,
+        capabilityToken: session.token,
+        origin: "https://attacker.example.test",
+      }),
+    ).resolves.toBeNull();
+
+    await t.run(async (ctx) => {
+      const visitor = await ctx.db
+        .query("visitors")
+        .withIndex("by_workspaceId_and_capabilityToken", (q) =>
+          q.eq("workspaceId", workspaceId).eq("capabilityToken", session.token),
+        )
+        .unique();
+      if (!visitor) throw new Error("Expected visitor");
+      await ctx.db.patch("visitors", visitor._id, {
+        capabilityExpiresAt: 0,
+        capabilityExpired: true,
+      });
+    });
+    await expect(
+      t.mutation(getBootstrapRenewalPolicy, {
+        workspaceId,
+        capabilityToken: session.token,
+        origin: TEST_WIDGET_ORIGIN,
+      }),
+    ).resolves.toBeNull();
+  });
+
   test("new sessions require a short-lived origin bootstrap and reject replay", async () => {
     const t = makeTestBackend();
     const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);

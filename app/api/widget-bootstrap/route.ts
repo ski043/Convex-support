@@ -48,14 +48,33 @@ export async function POST(request: Request) {
   }
 
   let workspaceId: string;
+  let renewal: { capabilityToken: string; origin: string } | null = null;
   try {
     const body: unknown = await request.json();
     if (!body || typeof body !== "object") return reject(requestOrigin, 400);
-    const candidate = (body as Record<string, unknown>).workspaceId;
+    const record = body as Record<string, unknown>;
+    const candidate = record.workspaceId;
     if (typeof candidate !== "string" || !workspacePattern.test(candidate)) {
       return reject(requestOrigin, 400);
     }
     workspaceId = candidate;
+
+    const serverOrigin = normalizeWidgetOrigin(new URL(request.url).origin);
+    const parentOrigin = normalizeWidgetOrigin(
+      typeof record.parentOrigin === "string" ? record.parentOrigin : null,
+    );
+    const capabilityToken =
+      typeof record.capabilityToken === "string" &&
+      /^[0-9a-f]{64}$/u.test(record.capabilityToken)
+        ? record.capabilityToken
+        : null;
+    if (
+      requestOrigin === serverOrigin &&
+      parentOrigin &&
+      capabilityToken
+    ) {
+      renewal = { capabilityToken, origin: parentOrigin };
+    }
   } catch {
     return reject(requestOrigin, 400);
   }
@@ -68,18 +87,26 @@ export async function POST(request: Request) {
 
   try {
     const client = new ConvexHttpClient(convexUrl);
-    const policy = await client.query(api.widgetBootstrap.getPolicy, {
-      workspaceId: workspaceId as Id<"workspaces">,
-      origin: requestOrigin,
-    });
+    const policy = renewal
+      ? await client.mutation(api.widgetBootstrap.getRenewalPolicy, {
+          workspaceId: workspaceId as Id<"workspaces">,
+          capabilityToken: renewal.capabilityToken,
+          origin: renewal.origin,
+        })
+      : await client.query(api.widgetBootstrap.getPolicy, {
+          workspaceId: workspaceId as Id<"workspaces">,
+          origin: requestOrigin,
+        });
     if (!policy?.allowed) return reject(requestOrigin);
+
+    const policyOrigin = renewal?.origin ?? requestOrigin;
 
     const issuedAt = Date.now();
     const bootstrapToken = await signWidgetBootstrap(
       {
         version: WIDGET_BOOTSTRAP_VERSION,
         workspaceId,
-        origin: requestOrigin,
+        origin: policyOrigin,
         policyVersion: policy.policyVersion,
         issuedAt,
         expiresAt: issuedAt + WIDGET_BOOTSTRAP_TTL_MS,

@@ -320,6 +320,31 @@ function cleanPlatformContext(value: unknown): PlatformContext | null {
   };
 }
 
+async function requestWidgetBootstrapRenewal(
+  workspaceId: Id<"workspaces">,
+  parentOrigin: string,
+  capabilityToken: string,
+) {
+  const response = await fetch("/api/widget-bootstrap", {
+    method: "POST",
+    credentials: "omit",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, parentOrigin, capabilityToken }),
+  });
+  if (!response.ok) throw new Error("Widget bootstrap renewal was rejected.");
+  const result: unknown = await response.json();
+  if (
+    !isRecord(result) ||
+    typeof result.bootstrapToken !== "string" ||
+    !result.bootstrapToken ||
+    result.bootstrapToken.length > 4_096
+  ) {
+    throw new Error("Widget bootstrap renewal was invalid.");
+  }
+  return result.bootstrapToken;
+}
+
 function newClientMessageId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
 
@@ -487,10 +512,29 @@ export function WidgetEmbed({
     bootstrapTimeout.current = window.setTimeout(() => {
       bootstrapTimeout.current = undefined;
       if (!bootstrapInFlight.current) return;
-      bootstrapInFlight.current = false;
-      if (mounted.current) setSessionStatus("error");
+      if (!hostToken) {
+        bootstrapInFlight.current = false;
+        if (mounted.current) setSessionStatus("error");
+        return;
+      }
+      void requestWidgetBootstrapRenewal(
+        workspaceId,
+        parentOrigin,
+        hostToken,
+      )
+        .then((bootstrapToken) => {
+          if (!mounted.current || !bootstrapInFlight.current) return;
+          bootstrapInFlight.current = false;
+          setHostBootstrapToken(bootstrapToken);
+          if (sessionStatus !== "ready") setSessionStatus("waiting");
+        })
+        .catch(() => {
+          if (!bootstrapInFlight.current) return;
+          bootstrapInFlight.current = false;
+          if (mounted.current) setSessionStatus("error");
+        });
     }, 5_000);
-  }, [postToParent]);
+  }, [hostToken, parentOrigin, postToParent, sessionStatus, workspaceId]);
 
   const handleBootstrapMessage = useEffectEvent(
     (data: Record<string, unknown>) => {
