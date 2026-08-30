@@ -32,8 +32,20 @@ type ProcessingDocument = {
   sha256: string;
   stableKey: string;
   version: number;
+  replacesDocumentId?: Id<"knowledgeDocuments">;
   processingToken: string;
 };
+
+export function knowledgeRagKey(
+  document: Pick<
+    ProcessingDocument,
+    "stableKey" | "version" | "replacesDocumentId"
+  >,
+) {
+  return document.replacesDocumentId
+    ? `${document.stableKey}:version:${document.version}`
+    : document.stableKey;
+}
 
 const beginProcessingReference = makeFunctionReference<
   "mutation",
@@ -192,7 +204,10 @@ export const processDocument = internalAction({
       const chunks = await extractKnowledgeChunks(document.fileKind, bytes);
       const result = await knowledgeRag.add(ctx, {
         namespace: knowledgeNamespace(document.workspaceId),
-        key: document.stableKey,
+        // A replacement must not reuse the live version's RAG key: RAG swaps
+        // matching keys before onComplete, which would create a search gap if
+        // this processing lease then went stale.
+        key: knowledgeRagKey(document),
         title: document.title,
         contentHash: document.sha256,
         metadata: {

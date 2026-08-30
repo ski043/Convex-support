@@ -5,10 +5,12 @@ import { makeFunctionReference } from "convex/server";
 import type { GenericId } from "convex/values";
 import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
+import { components } from "./_generated/api";
 import {
   MAX_AUTOMATIC_CLEANUP_ATTEMPTS,
   runCleanupAttempt,
 } from "./knowledgeCleanup";
+import { consumeRegistrationQuota } from "./knowledge";
 import {
   decodeUtf8Document,
   KnowledgeProcessingError,
@@ -16,7 +18,7 @@ import {
   validateKnowledgeFileType,
   validatePdfEnvelope,
 } from "./knowledgeModel";
-import { matchesStoredSha256 } from "./knowledgeNode";
+import { knowledgeRagKey, matchesStoredSha256 } from "./knowledgeNode";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -43,6 +45,7 @@ const list = makeFunctionReference<
     filename: string;
     status: string;
     size: number;
+    canReplace: boolean;
   }>
 >("knowledge:list");
 
@@ -189,6 +192,23 @@ function buildSinglePagePdf(contentStream: string) {
 }
 
 describe("knowledge metadata validation", () => {
+  test("uses a distinct RAG key until a replacement is ready", () => {
+    expect(
+      knowledgeRagKey({
+        stableKey: "document:guide",
+        version: 1,
+        replacesDocumentId: undefined,
+      }),
+    ).toBe("document:guide");
+    expect(
+      knowledgeRagKey({
+        stableKey: "document:guide",
+        version: 2,
+        replacesDocumentId: "replacement" as KnowledgeDocumentId,
+      }),
+    ).toBe("document:guide:version:2");
+  });
+
   test("accepts Convex storage hashes in hosted Base64 and documented hex", async () => {
     const bytes = new TextEncoder().encode("MarshalDesk hash fixture");
 
@@ -338,6 +358,7 @@ describe("knowledge registration", () => {
     ]);
     expect(Object.keys(documents[0] ?? {}).sort()).toEqual([
       "_id",
+      "canReplace",
       "canRetry",
       "createdAt",
       "fileKind",
@@ -555,6 +576,13 @@ describe("knowledge registration", () => {
       return { readyId, failedId };
     });
 
+    expect(await t.withIdentity(ownerA).query(list, {})).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ _id: readyId, canReplace: false }),
+        expect.objectContaining({ _id: failedId, canReplace: false }),
+      ]),
+    );
+
     await expect(
       t.withIdentity(ownerA).mutation(replace, {
         documentId: readyId,
@@ -571,6 +599,43 @@ describe("knowledge registration", () => {
     expect(
       await t.run(async (ctx) => ctx.db.get("knowledgeDocuments", failedId)),
     ).toMatchObject({ status: "replacing" });
+  });
+
+  test("charges registration bytes in a new UTC quota window", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-01T23:59:00Z"));
+      const t = backend();
+      const workspaceId = await createWorkspace(t, ownerA);
+      await t.withIdentity(ownerA).mutation(generateUploadUrl, {});
+      const contents = "registered after midnight";
+
+      vi.setSystemTime(new Date("2026-08-02T00:01:00Z"));
+      await t.run(async (ctx) =>
+        consumeRegistrationQuota(
+          ctx,
+          workspaceId,
+          contents.length,
+          new Date("2026-08-01T23:59:00Z").getTime(),
+        ),
+      );
+      const byteQuota = await t.run(async (ctx) =>
+        ctx.runQuery(components.rateLimiter.lib.getValue, {
+          name: "knowledgeUploadBytes",
+          key: String(workspaceId),
+          config: {
+            kind: "fixed window",
+            rate: 100 * 1024 * 1024,
+            period: 24 * 60 * 60_000,
+            capacity: 100 * 1024 * 1024,
+            start: 0,
+          },
+        }),
+      );
+      expect(byteQuota.value).toBe(100 * 1024 * 1024 - contents.length);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

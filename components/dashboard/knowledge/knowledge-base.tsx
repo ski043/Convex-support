@@ -350,7 +350,7 @@ function DocumentRow({
                 Retry cleanup
               </Button>
             ) : null}
-            {document.status === "ready" ? (
+            {document.canReplace ? (
               <Button
                 type="button"
                 variant="ghost"
@@ -621,6 +621,14 @@ export function KnowledgeBase({
           "Registration did not finish. Retry to complete it safely.",
         ),
       });
+    } finally {
+      if (target.kind === "replace") {
+        setPendingActions((current) => {
+          const next = { ...current };
+          delete next[target.documentId];
+          return next;
+        });
+      }
     }
   }
 

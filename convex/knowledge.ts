@@ -79,6 +79,7 @@ const knowledgeRateLimiter = new RateLimiter(components.rateLimiter, {
     rate: KNOWLEDGE_UPLOAD_BYTES_PER_DAY,
     period: DAY,
     capacity: KNOWLEDGE_UPLOAD_BYTES_PER_DAY,
+    start: 0,
   },
   knowledgeIngestionWorkspace: {
     kind: "token bucket",
@@ -117,6 +118,7 @@ const documentListItemValidator = v.object({
   errorCode: v.optional(v.string()),
   errorMessage: v.optional(v.string()),
   canRetry: v.boolean(),
+  canReplace: v.boolean(),
   createdAt: v.number(),
   updatedAt: v.number(),
   readyAt: v.optional(v.number()),
@@ -141,6 +143,7 @@ const processingDocumentValidator = v.union(
     sha256: v.string(),
     stableKey: v.string(),
     version: v.number(),
+    replacesDocumentId: v.optional(v.id("knowledgeDocuments")),
     processingToken: v.string(),
   }),
 );
@@ -168,10 +171,11 @@ function normalizeDeclaredMimeType(value: string) {
   return normalized;
 }
 
-async function consumeRegistrationQuota(
+export async function consumeRegistrationQuota(
   ctx: MutationCtx,
   workspaceId: Id<"workspaces">,
   size: number,
+  uploadedAt: number,
 ) {
   const key = String(workspaceId);
   const countLimit = await knowledgeRateLimiter.limit(
@@ -185,6 +189,23 @@ async function consumeRegistrationQuota(
       "The daily knowledge upload limit has been reached.",
     );
   }
+  const registeredInReservationWindow =
+    Math.floor(uploadedAt / DAY) === Math.floor(Date.now() / DAY);
+  if (!registeredInReservationWindow) {
+    const byteLimit = await knowledgeRateLimiter.limit(
+      ctx,
+      "knowledgeUploadBytes",
+      { key, count: size },
+    );
+    if (!byteLimit.ok) {
+      throw knowledgeError(
+        "UPLOAD_QUOTA_EXCEEDED",
+        "The daily knowledge upload byte limit has been reached.",
+      );
+    }
+    return;
+  }
+
   const unusedReservation = MAX_KNOWLEDGE_FILE_BYTES - size;
   if (unusedReservation > 0) {
     const current = await knowledgeRateLimiter.getValue(
@@ -193,8 +214,8 @@ async function consumeRegistrationQuota(
       { key },
     );
     // The component has no refund API. A bounded negative consume restores
-    // only this upload's unused reservation and never exceeds bucket capacity,
-    // including when registration crosses a fixed-window boundary.
+    // only this same-window upload's unused reservation and never exceeds
+    // bucket capacity.
     const refundable = Math.min(
       unusedReservation,
       Math.max(0, KNOWLEDGE_UPLOAD_BYTES_PER_DAY - current.value),
@@ -230,9 +251,10 @@ async function deleteRagEntryIfPresent(
   try {
     await knowledgeRag.deleteAsync(ctx, { entryId: entryId as EntryId });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/entry .* not found/i.test(message)) return;
-    throw error;
+    // RAG cleanup is best-effort here. Search results are independently gated
+    // by ready knowledgeDocuments, so an upstream wording or transport change
+    // must not roll back document deletion or its storage cleanup schedule.
+    console.warn(`Could not delete RAG entry ${entryId}; continuing cleanup.`, error);
   }
 }
 
@@ -375,7 +397,12 @@ async function registerUpload(
     );
   }
 
-  await consumeRegistrationQuota(ctx, workspace._id, storedFile.size);
+  await consumeRegistrationQuota(
+    ctx,
+    workspace._id,
+    storedFile.size,
+    storedFile._creationTime,
+  );
   const now = Date.now();
   const documentId = await ctx.db.insert("knowledgeDocuments", {
     workspaceId: workspace._id,
@@ -411,6 +438,16 @@ export const list = query({
       )
       .order("desc")
       .take(100);
+    const latestVersionByStableKey = new Map<string, number>();
+    for (const document of documents) {
+      latestVersionByStableKey.set(
+        document.stableKey,
+        Math.max(
+          latestVersionByStableKey.get(document.stableKey) ?? 0,
+          document.version,
+        ),
+      );
+    }
     return documents.map((document) => ({
       _id: document._id,
       filename: document.filename,
@@ -428,6 +465,9 @@ export const list = query({
       canRetry:
         document.status === "failed" &&
         document.attempt < MAX_TOTAL_INGESTION_ATTEMPTS,
+      canReplace:
+        document.status === "ready" &&
+        latestVersionByStableKey.get(document.stableKey) === document.version,
       createdAt: document.createdAt,
       updatedAt: document.updatedAt,
       ...(document.readyAt === undefined ? {} : { readyAt: document.readyAt }),
@@ -636,6 +676,9 @@ export const beginProcessing = internalMutation({
       sha256: document.sha256,
       stableKey: document.stableKey,
       version: document.version,
+      ...(document.replacesDocumentId === undefined
+        ? {}
+        : { replacesDocumentId: document.replacesDocumentId }),
       processingToken: token,
     };
   },
@@ -765,13 +808,15 @@ async function commitReadyEntry(
   processingTokenValue: string,
   ragEntryId: string,
   replacedRagEntryId: string | null,
-  deleteEntryOnStale: boolean,
 ) {
+  const replacedDocument = document.replacesDocumentId
+    ? await ctx.db.get("knowledgeDocuments", document.replacesDocumentId)
+    : null;
   if (
     document.status !== "processing" ||
     document.processingToken !== processingTokenValue
   ) {
-    if (deleteEntryOnStale) {
+    if (replacedDocument?.ragEntryId !== ragEntryId) {
       await deleteRagEntryIfPresent(ctx, ragEntryId);
     }
     return;
@@ -788,9 +833,6 @@ async function commitReadyEntry(
     updatedAt: now,
   });
 
-  const replacedDocument = document.replacesDocumentId
-    ? await ctx.db.get("knowledgeDocuments", document.replacesDocumentId)
-    : null;
   if (
     replacedDocument &&
     replacedDocument.workspaceId === document.workspaceId &&
@@ -827,7 +869,6 @@ export const completeExistingEntry = internalMutation({
       args.processingToken,
       args.ragEntryId,
       args.replacedRagEntryId,
-      false,
     );
     return null;
   },
@@ -898,7 +939,6 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
       metadata.processingToken,
       args.entry.entryId,
       args.replacedEntry?.entryId ?? null,
-      true,
     );
   },
 );
