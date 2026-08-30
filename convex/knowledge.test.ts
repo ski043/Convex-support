@@ -19,6 +19,7 @@ import {
   validatePdfEnvelope,
 } from "./knowledgeModel";
 import { knowledgeRagKey, matchesStoredSha256 } from "./knowledgeNode";
+import { knowledgeRag } from "./knowledgeRag";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -453,14 +454,43 @@ describe("knowledge registration", () => {
     ]);
   });
 
+  test("rejects registration until the upload is claimed", async () => {
+    const t = backend();
+    await createWorkspace(t, ownerA);
+    const asOwner = t.withIdentity(ownerA);
+    const { reservationToken } = await asOwner.mutation(generateUploadUrl, {});
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["claimed source"], { type: "text/plain" })),
+    );
+    const request = {
+      storageId,
+      filename: "source.txt",
+      mimeType: "text/plain",
+      clientRequestId: "7fd1f3f9-7c6d-49eb-99ea-77cdb3475e62",
+    };
+
+    await expect(asOwner.mutation(register, request)).rejects.toThrow(
+      "not claimed for this workspace",
+    );
+    await asOwner.mutation(claimUpload, { reservationToken, storageId });
+    // convex-test does not preserve Blob.type in _storage metadata, so the
+    // registration reaches the subsequent file-type check after the claim.
+    await expect(asOwner.mutation(register, request)).rejects.toThrow(
+      "Only PDF, Markdown, and plain-text files",
+    );
+  });
+
   test("rejects a spoofed client MIME when storage metadata disagrees", async () => {
     const t = backend();
     await createWorkspace(t, ownerA);
+    const asOwner = t.withIdentity(ownerA);
+    const { reservationToken } = await asOwner.mutation(generateUploadUrl, {});
     const storageId = await t.run(async (ctx) =>
       ctx.storage.store(new Blob(["plain text"], { type: "text/plain" })),
     );
+    await asOwner.mutation(claimUpload, { reservationToken, storageId });
     await expect(
-      t.withIdentity(ownerA).mutation(register, {
+      asOwner.mutation(register, {
         storageId,
         filename: "spoofed.pdf",
         mimeType: "application/pdf",
@@ -579,6 +609,57 @@ describe("knowledge registration", () => {
         (await ctx.db.get("knowledgeDocuments", oldDocumentId))?.status,
       ),
     ).toBe("deleting");
+  });
+
+  test("does not delete a deduplicated entry after its processing lease goes stale", async () => {
+    const deleteAsync = vi
+      .spyOn(knowledgeRag, "deleteAsync")
+      .mockResolvedValue(undefined);
+    try {
+      const t = backend();
+      const workspaceId = await createWorkspace(t, ownerA);
+      const storageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["ready"], { type: "text/plain" })),
+      );
+      const now = Date.now();
+      const documentId = await t.run(async (ctx) =>
+        ctx.db.insert("knowledgeDocuments", {
+          workspaceId,
+          storageId,
+          clientRequestId: "fd59d353-a759-4eed-b597-24836f698877",
+          stableKey: "document:deduplicated",
+          version: 1,
+          filename: "ready.txt",
+          title: "Ready",
+          mimeType: "text/plain",
+          fileKind: "text",
+          size: 5,
+          sha256: "ready-hash",
+          status: "ready",
+          ragEntryId: "rag:live",
+          attempt: 2,
+          createdAt: now,
+          updatedAt: now,
+          readyAt: now,
+        }),
+      );
+
+      await t.mutation(completeExistingEntry, {
+        documentId,
+        processingToken: "stale-processing-token",
+        ragEntryId: "rag:live",
+        replacedRagEntryId: null,
+      });
+
+      expect(deleteAsync).not.toHaveBeenCalled();
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.get("knowledgeDocuments", documentId),
+        ),
+      ).toMatchObject({ status: "ready", ragEntryId: "rag:live" });
+    } finally {
+      deleteAsync.mockRestore();
+    }
   });
 
   test("keeps one replacement lineage until a failed version is retried or deleted", async () => {

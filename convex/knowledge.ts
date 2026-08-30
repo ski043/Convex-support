@@ -387,6 +387,12 @@ async function registerUpload(
     replacesDocumentId = replacing._id;
   }
 
+  const uploadReservation = await requireClaimedUploadReservation(
+    ctx,
+    workspace._id,
+    args.storageId,
+  );
+
   const storedFile = await ctx.db.system.get("_storage", args.storageId);
   if (!storedFile) {
     throw knowledgeError("UPLOAD_NOT_FOUND", "Uploaded file not found.");
@@ -428,9 +434,27 @@ async function registerUpload(
     createdAt: now,
     updatedAt: now,
   });
-  await releaseUploadReservation(ctx, workspace._id, args.storageId);
+  await ctx.db.delete("knowledgeUploadReservations", uploadReservation._id);
   await ctx.scheduler.runAfter(0, processDocumentReference, { documentId });
   return { documentId };
+}
+
+async function requireClaimedUploadReservation(
+  ctx: MutationCtx,
+  workspaceId: Id<"workspaces">,
+  storageId: Id<"_storage">,
+) {
+  const reservation = await ctx.db
+    .query("knowledgeUploadReservations")
+    .withIndex("by_storageId", (q) => q.eq("storageId", storageId))
+    .unique();
+  if (!reservation || reservation.workspaceId !== workspaceId) {
+    throw knowledgeError(
+      "UPLOAD_RESERVATION_NOT_FOUND",
+      "The uploaded file was not claimed for this workspace. Upload it again.",
+    );
+  }
+  return reservation;
 }
 
 async function releaseUploadReservation(
@@ -906,6 +930,7 @@ async function commitReadyEntry(
   processingTokenValue: string,
   ragEntryId: string,
   replacedRagEntryId: string | null,
+  deleteEntryOnStale: boolean,
 ) {
   const replacedDocument = document.replacesDocumentId
     ? await ctx.db.get("knowledgeDocuments", document.replacesDocumentId)
@@ -914,7 +939,7 @@ async function commitReadyEntry(
     document.status !== "processing" ||
     document.processingToken !== processingTokenValue
   ) {
-    if (replacedDocument?.ragEntryId !== ragEntryId) {
+    if (deleteEntryOnStale && replacedDocument?.ragEntryId !== ragEntryId) {
       await deleteRagEntryIfPresent(ctx, ragEntryId);
     }
     return;
@@ -967,6 +992,7 @@ export const completeExistingEntry = internalMutation({
       args.processingToken,
       args.ragEntryId,
       args.replacedRagEntryId,
+      false,
     );
     return null;
   },
@@ -1037,6 +1063,7 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
       metadata.processingToken,
       args.entry.entryId,
       args.replacedEntry?.entryId ?? null,
+      true,
     );
   },
 );
