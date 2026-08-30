@@ -1,8 +1,8 @@
 "use client";
 
-import { usePaginatedQuery } from "convex/react";
-import { ArrowLeftIcon, CheckIcon, SendIcon } from "lucide-react";
-import { useId, useMemo } from "react";
+import { useMutation, usePaginatedQuery } from "convex/react";
+import { ArrowLeftIcon, BotIcon, CheckIcon, HandIcon, SendIcon } from "lucide-react";
+import { useId, useMemo, useState } from "react";
 import {
   conversationLabel,
   type InboxConversation,
@@ -74,6 +74,7 @@ function Composer({
           <InputGroup className="h-auto">
             <InputGroupTextarea
               id={replyId}
+              name="owner-reply"
               value={draft}
               rows={3}
               placeholder={
@@ -140,6 +141,12 @@ export function ConversationDisplay({
   onResolve: () => void;
   onBack?: () => void;
 }) {
+  const takeOver = useMutation(api.aiAutomation.takeOver);
+  const resumeAi = useMutation(api.aiAutomation.resumeAi);
+  const [automationAction, setAutomationAction] = useState<
+    "takeover" | "resume" | null
+  >(null);
+  const [automationError, setAutomationError] = useState<string | null>(null);
   const { results, status, loadMore } = usePaginatedQuery(
     api.inbox.listMessages,
     { conversationId: conversation._id },
@@ -158,6 +165,27 @@ export function ConversationDisplay({
   const location = [conversation.visitor.city, conversation.visitor.country]
     .filter(Boolean)
     .join(", ");
+
+  async function updateAutomation(action: "takeover" | "resume") {
+    if (automationAction) return;
+    setAutomationAction(action);
+    setAutomationError(null);
+    try {
+      if (action === "takeover") {
+        await takeOver({ conversationId: conversation._id });
+      } else {
+        await resumeAi({ conversationId: conversation._id });
+      }
+    } catch {
+      setAutomationError(
+        action === "takeover"
+          ? "AI could not be paused. Try again before replying."
+          : "AI could not be resumed. Try again.",
+      );
+    } finally {
+      setAutomationAction(null);
+    }
+  }
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -190,12 +218,62 @@ export function ConversationDisplay({
               <Badge variant={open ? "secondary" : "outline"}>
                 {open ? "Open" : "Resolved"}
               </Badge>
+              <Badge
+                variant={
+                  conversation.handlingState === "needs_human"
+                    ? "destructive"
+                    : "outline"
+                }
+              >
+                {conversation.handlingState === "ai_handling"
+                  ? conversation.isAiTyping
+                    ? "AI answering"
+                    : "AI handling"
+                  : conversation.handlingState === "needs_human"
+                    ? "Needs human"
+                    : conversation.handlingState === "human_handling"
+                      ? "Human handling"
+                      : "Resolved"}
+              </Badge>
               {resolveError ? <Badge variant="destructive">Couldn&apos;t resolve</Badge> : null}
             </div>
             <p className="truncate text-xs text-muted-foreground">
-              {location || "Location unavailable"}
+              {automationError ?? (location || "Location unavailable")}
             </p>
           </div>
+          {conversation.canTakeOver ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-10 sm:h-8"
+              disabled={automationAction !== null}
+              onClick={() => void updateAutomation("takeover")}
+            >
+              {automationAction === "takeover" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <HandIcon data-icon="inline-start" />
+              )}
+              Take over
+            </Button>
+          ) : conversation.canResume ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-10 sm:h-8"
+              disabled={automationAction !== null}
+              onClick={() => void updateAutomation("resume")}
+            >
+              {automationAction === "resume" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <BotIcon data-icon="inline-start" />
+              )}
+              Resume AI
+            </Button>
+          ) : null}
           <VisitorDetailsSheet conversation={conversation} />
           <Tooltip>
             <TooltipTrigger

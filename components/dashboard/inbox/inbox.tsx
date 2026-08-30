@@ -67,12 +67,17 @@ function EmptyInbox() {
 }
 
 export function Inbox() {
+  const [attentionFilter, setAttentionFilter] = useState<
+    "all" | "needs_human"
+  >("all");
   const {
     results: conversations,
     status: conversationStatus,
     loadMore: loadMoreConversations,
   } = usePaginatedQuery(
-    api.inbox.listConversations,
+    attentionFilter === "needs_human"
+      ? api.inbox.listNeedsHuman
+      : api.inbox.listConversations,
     {},
     { initialNumItems: 50 },
   );
@@ -185,6 +190,14 @@ export function Inbox() {
     );
   }
 
+  function changeAttentionFilter(value: "all" | "needs_human") {
+    if (value === attentionFilter) return;
+    setAttentionFilter(value);
+    setSelectedId(null);
+    setMobileThreadOpen(false);
+    setQuery("");
+  }
+
   function changeDraft(value: string) {
     setDraft(value);
     const attempt = replyAttempt.current;
@@ -290,16 +303,20 @@ export function Inbox() {
   const listPane = (
     <ConversationListPane
       conversations={filtered}
-      hasAnyConversations={conversations.length > 0}
+      hasAnyConversations={
+        attentionFilter === "needs_human" || conversations.length > 0
+      }
       totalConversationCount={conversations.length}
       totalUnreadCount={totalUnreadCount}
       selectedId={selectedId}
       query={query}
       now={now}
       paginationStatus={conversationStatus}
+      attentionFilter={attentionFilter}
       onQueryChange={setQuery}
       onSelect={selectConversation}
       onLoadMore={() => loadMoreConversations(50)}
+      onAttentionFilterChange={changeAttentionFilter}
     />
   );
 

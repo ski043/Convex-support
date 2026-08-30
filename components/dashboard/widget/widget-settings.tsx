@@ -3,10 +3,14 @@
 import { usePreloadedAuthQuery } from "@convex-dev/better-auth/nextjs/client";
 import { useMutation, type Preloaded } from "convex/react";
 import {
+  AlertTriangleIcon,
   CheckIcon,
   Code2Icon,
   CopyIcon,
+  Globe2Icon,
   MessageCircleIcon,
+  PlusIcon,
+  Trash2Icon,
 } from "lucide-react";
 import {
   useEffect,
@@ -14,8 +18,14 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type FormEvent,
 } from "react";
 import { LogoMark } from "@/components/logo";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -29,6 +39,8 @@ import {
 } from "@/components/ui/card";
 import {
   Field,
+  FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
   FieldLegend,
@@ -54,6 +66,8 @@ type WidgetSettingsDraft = {
   position: WidgetPosition;
 };
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+type OriginPolicy = "legacy_limited" | "enforced";
+type OriginDraft = { id: string; value: string };
 
 const defaultWidgetSettings: WidgetSettingsDraft = {
   displayName: "MarshalDesk support",
@@ -125,6 +139,207 @@ function settingsAreEqual(a: WidgetSettingsDraft, b: WidgetSettingsDraft) {
 
 function subscribeToDashboardOrigin() {
   return () => {};
+}
+
+function ownerSafeError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+
+  const data = (error as Error & { data?: unknown }).data;
+  if (typeof data === "string" && data.trim()) return data.trim();
+
+  const message = /ConvexError:\s*([^\n]+)/i.exec(error.message)?.[1]?.trim();
+
+  return message || fallback;
+}
+
+function OriginSecuritySettings({
+  initialOrigins,
+  initialPolicy,
+  dashboardOrigin,
+}: {
+  initialOrigins: string[];
+  initialPolicy: OriginPolicy;
+  dashboardOrigin: string;
+}) {
+  const saveSecurity = useMutation(api.widgetSettings.saveSecurity);
+  const [origins, setOrigins] = useState<OriginDraft[]>(() =>
+    (initialOrigins.length > 0
+      ? initialOrigins
+      : [initialPolicy === "legacy_limited" ? dashboardOrigin : ""]
+    ).map((value, index) => ({ id: `origin-${index}`, value })),
+  );
+  const [policy, setPolicy] = useState<OriginPolicy>(initialPolicy);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const nextOriginId = useRef(origins.length);
+
+  function updateOrigin(id: string, value: string) {
+    setOrigins((current) =>
+      current.map((origin) =>
+        origin.id === id ? { ...origin, value } : origin,
+      ),
+    );
+    setSaveStatus("idle");
+    setSaveError(null);
+  }
+
+  function addOrigin() {
+    const id = `origin-${nextOriginId.current}`;
+    nextOriginId.current += 1;
+    setOrigins((current) =>
+      current.length >= 20
+        ? current
+        : [...current, { id, value: "" }],
+    );
+    setSaveStatus("idle");
+    setSaveError(null);
+  }
+
+  function removeOrigin(id: string) {
+    setOrigins((current) => {
+      if (current.length === 1) return [{ ...current[0], value: "" }];
+      return current.filter((origin) => origin.id !== id);
+    });
+    setSaveStatus("idle");
+    setSaveError(null);
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saveStatus === "saving") return;
+
+    setSaveStatus("saving");
+    setSaveError(null);
+
+    try {
+      await saveSecurity({ allowedOrigins: origins.map((origin) => origin.value) });
+      setPolicy("enforced");
+      setSaveStatus("saved");
+    } catch (error) {
+      setSaveStatus("error");
+      setSaveError(
+        ownerSafeError(
+          error,
+          "We couldn’t save these origins. Check each exact origin and try again.",
+        ),
+      );
+    }
+  }
+
+  return (
+    <Card className="gap-0 py-0">
+      <CardHeader className="border-b py-(--card-spacing)">
+        <CardTitle>Allowed website origins</CardTitle>
+        <CardDescription>
+          Decide exactly which websites can start new support sessions.
+        </CardDescription>
+        <CardAction>
+          <Badge variant={policy === "enforced" ? "secondary" : "destructive"}>
+            {policy === "enforced" ? "Enforced" : "Action needed"}
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="py-(--card-spacing)">
+        <form className="flex flex-col gap-5" onSubmit={(event) => void handleSave(event)}>
+          <FieldGroup>
+            {origins.map((origin, index) => {
+              const inputId = `widget-${origin.id}`;
+
+              return (
+                <Field key={origin.id} data-invalid={saveStatus === "error"}>
+                  <FieldLabel htmlFor={inputId}>
+                    {index === 0 ? "Website origin" : `Website origin ${index + 1}`}
+                  </FieldLabel>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id={inputId}
+                      name={`widget-origin-${index}`}
+                      className="h-10 font-mono text-sm sm:h-8"
+                      value={origin.value}
+                      aria-invalid={saveStatus === "error"}
+                      autoCapitalize="none"
+                      autoComplete="url"
+                      inputMode="url"
+                      placeholder="https://support.example.com"
+                      spellCheck={false}
+                      onChange={(event) => updateOrigin(origin.id, event.target.value)}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-lg"
+                      className="size-10 sm:size-8"
+                      aria-label={`Remove ${origin.value || `website origin ${index + 1}`}`}
+                      onClick={() => removeOrigin(origin.id)}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </div>
+                  {index === origins.length - 1 ? (
+                    <FieldDescription>
+                      Use the exact <code className="font-mono">http://</code> or{" "}
+                      <code className="font-mono">https://</code> origin only—no paths,
+                      query strings, or wildcards. Up to 20 origins.
+                    </FieldDescription>
+                  ) : null}
+                </Field>
+              );
+            })}
+          </FieldGroup>
+
+          {saveError ? <FieldError>{saveError}</FieldError> : null}
+
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 sm:h-8"
+              disabled={origins.length >= 20 || saveStatus === "saving"}
+              onClick={addOrigin}
+            >
+              <PlusIcon data-icon="inline-start" />
+              Add origin
+            </Button>
+            <div className="flex items-center justify-end gap-3">
+              <p
+                className={cn(
+                  "text-xs text-muted-foreground",
+                  saveStatus === "saved" && "text-[var(--status-open)]",
+                  saveStatus === "error" && "text-destructive",
+                )}
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {saveStatus === "saving"
+                  ? "Validating and saving…"
+                  : saveStatus === "saved"
+                    ? "Origins saved and enforced."
+                    : saveStatus === "error"
+                      ? "Origins were not saved."
+                      : policy === "legacy_limited"
+                        ? "Review and save to enable enforcement."
+                        : "Changes apply after you save."}
+              </p>
+              <Button
+                type="submit"
+                className="h-10 sm:h-8"
+                disabled={saveStatus === "saving"}
+              >
+                {saveStatus === "saving" ? (
+                  <Spinner data-icon="inline-start" />
+                ) : saveStatus === "saved" ? (
+                  <CheckIcon data-icon="inline-start" />
+                ) : (
+                  <Globe2Icon data-icon="inline-start" />
+                )}
+                {saveStatus === "saving" ? "Saving" : "Save origins"}
+              </Button>
+            </div>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
 }
 
 function WidgetPreview({
@@ -241,14 +456,20 @@ function WidgetPreview({
 
 export function WidgetSettings({
   preloadedSettings,
+  preloadedSecurity,
   preloadedWorkspace,
 }: {
   preloadedSettings: Preloaded<typeof api.widgetSettings.get>;
+  preloadedSecurity: Preloaded<typeof api.widgetSettings.getSecurity>;
   preloadedWorkspace: Preloaded<typeof api.workspaces.getCurrent>;
 }) {
   const initialSettings =
     usePreloadedAuthQuery(preloadedSettings) ?? defaultWidgetSettings;
   const workspace = usePreloadedAuthQuery(preloadedWorkspace);
+  const security = usePreloadedAuthQuery(preloadedSecurity) ?? {
+    allowedOrigins: [],
+    originPolicy: "legacy_limited" as const,
+  };
   const saveSettings = useMutation(api.widgetSettings.save);
   const ensureWorkspace = useMutation(api.workspaces.ensureCurrent);
   const [settings, setSettings] = useState<WidgetSettingsDraft>(() => initialSettings);
@@ -375,6 +596,18 @@ export function WidgetSettings({
         </p>
       </header>
 
+      {security.originPolicy === "legacy_limited" ? (
+        <Alert className="border-destructive/35 bg-destructive/10 py-3">
+          <AlertTriangleIcon aria-hidden />
+          <AlertTitle>New-session protection is still in legacy-limited mode</AlertTitle>
+          <AlertDescription>
+            Your current widget keeps working, but new sessions are not restricted to
+            your websites yet. Review the suggested dashboard origin below, replace it
+            with your customer-facing site if needed, and save to enforce the exact list.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       <div className="flex flex-1 flex-col gap-8 xl:flex-row xl:items-start">
         <div className="flex min-w-0 flex-1 flex-col gap-6">
           <Card className="gap-0 py-0">
@@ -413,6 +646,7 @@ export function WidgetSettings({
                       <FieldLabel htmlFor="widget-display-name">Display name</FieldLabel>
                       <Input
                         id="widget-display-name"
+                        name="widget-display-name"
                         className="h-10 sm:h-8"
                         value={settings.displayName}
                         maxLength={40}
@@ -426,6 +660,7 @@ export function WidgetSettings({
                       <FieldLabel htmlFor="widget-greeting">Greeting</FieldLabel>
                       <Input
                         id="widget-greeting"
+                        name="widget-greeting"
                         className="h-10 sm:h-8"
                         value={settings.greeting}
                         maxLength={120}
@@ -523,6 +758,22 @@ export function WidgetSettings({
               </form>
             </CardContent>
           </Card>
+
+          {dashboardOrigin ? (
+            <OriginSecuritySettings
+              key={`${security.originPolicy}:${security.allowedOrigins.join("|")}`}
+              initialOrigins={security.allowedOrigins}
+              initialPolicy={security.originPolicy}
+              dashboardOrigin={dashboardOrigin}
+            />
+          ) : (
+            <Card size="sm">
+              <CardHeader>
+                <CardTitle>Allowed website origins</CardTitle>
+                <CardDescription>Preparing security controls…</CardDescription>
+              </CardHeader>
+            </Card>
+          )}
 
           <Card className="gap-0 py-0">
             <CardHeader className="border-b py-(--card-spacing)">

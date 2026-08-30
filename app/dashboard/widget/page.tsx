@@ -9,14 +9,16 @@ export const metadata: Metadata = {
 };
 
 export default async function WidgetPage() {
-  const [preloadedSettings, preloadedWorkspace] = await Promise.all([
+  const [preloadedSettings, preloadedSecurity, preloadedWorkspace] = await Promise.all([
     preloadAuthQuery(api.widgetSettings.get),
+    preloadAuthQuery(api.widgetSettings.getSecurity),
     preloadAuthQuery(api.workspaces.getCurrent),
   ]);
 
   return (
     <WidgetSettings
       preloadedSettings={preloadedSettings}
+      preloadedSecurity={preloadedSecurity}
       preloadedWorkspace={preloadedWorkspace}
     />
   );
