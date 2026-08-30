@@ -20,6 +20,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -318,6 +319,30 @@ function cleanPlatformContext(value: unknown): PlatformContext | null {
   };
 }
 
+async function requestWidgetBootstrapToken(
+  workspaceId: Id<"workspaces">,
+  parentOrigin: string,
+) {
+  const response = await fetch("/api/widget-bootstrap", {
+    method: "POST",
+    credentials: "omit",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, parentOrigin }),
+  });
+  if (!response.ok) throw new Error("Widget bootstrap was rejected.");
+  const result: unknown = await response.json();
+  if (
+    !isRecord(result) ||
+    typeof result.bootstrapToken !== "string" ||
+    !result.bootstrapToken ||
+    result.bootstrapToken.length > 4_096
+  ) {
+    throw new Error("Widget bootstrap was invalid.");
+  }
+  return result.bootstrapToken;
+}
+
 function newClientMessageId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
 
@@ -419,6 +444,7 @@ export function WidgetEmbed({
   const [platformContext, setPlatformContext] =
     useState<PlatformContext | null | undefined>();
   const sessionInFlight = useRef(false);
+  const bootstrapInFlight = useRef(false);
   const mounted = useRef(true);
   const lastSentContext = useRef("");
   const retryMessage = useRef<{ body: string; clientMessageId: string } | null>(
@@ -468,6 +494,52 @@ export function WidgetEmbed({
     window.parent.postMessage(message, parentOrigin);
   }, [parentOrigin]);
 
+  const refreshBootstrapToken = useCallback(async () => {
+    if (bootstrapInFlight.current) return;
+    bootstrapInFlight.current = true;
+    setHostBootstrapToken(undefined);
+    setSessionStatus("waiting");
+    try {
+      const bootstrapToken = await requestWidgetBootstrapToken(
+        workspaceId,
+        parentOrigin,
+      );
+      if (mounted.current) setHostBootstrapToken(bootstrapToken);
+    } catch {
+      if (mounted.current) setSessionStatus("error");
+    } finally {
+      bootstrapInFlight.current = false;
+    }
+  }, [parentOrigin, workspaceId]);
+
+  const handleBootstrapMessage = useEffectEvent(
+    (data: Record<string, unknown>) => {
+      if (
+        data.token !== null &&
+        (typeof data.token !== "string" ||
+          !data.token ||
+          data.token.length > 4096)
+      ) {
+        return;
+      }
+      const context = cleanPageContext(data.context, parentOrigin);
+      if (!context) return;
+      setHostToken(data.token);
+      setPageContext(context);
+      if (
+        typeof data.bootstrapToken === "string" &&
+        data.bootstrapToken &&
+        data.bootstrapToken.length <= 4_096
+      ) {
+        setHostBootstrapToken(data.bootstrapToken);
+      } else {
+        // Older cached loaders do not send a bootstrap token. Recover inside
+        // the iframe so a stale script cannot leave the widget connecting.
+        void refreshBootstrapToken();
+      }
+    },
+  );
+
   useEffect(() => {
     let cancelled = false;
 
@@ -511,24 +583,7 @@ export function WidgetEmbed({
       }
 
       if (data.type === WIDGET_BOOTSTRAP_MESSAGE_TYPE) {
-        if (
-          data.token !== null &&
-          (typeof data.token !== "string" || !data.token || data.token.length > 4096)
-        ) {
-          return;
-        }
-        if (
-          typeof data.bootstrapToken !== "string" ||
-          !data.bootstrapToken ||
-          data.bootstrapToken.length > 4_096
-        ) {
-          return;
-        }
-        const context = cleanPageContext(data.context, parentOrigin);
-        if (!context) return;
-        setHostToken(data.token);
-        setHostBootstrapToken(data.bootstrapToken);
-        setPageContext(context);
+        handleBootstrapMessage(data);
         return;
       }
 
@@ -724,7 +779,7 @@ export function WidgetEmbed({
         title="Couldn’t connect"
         description="Reload the page or try connecting again."
         onRetry={() => {
-          setSessionStatus("waiting");
+          void refreshBootstrapToken();
         }}
       />
     );

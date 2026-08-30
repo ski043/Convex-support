@@ -211,93 +211,93 @@ export async function runResponderOrchestration(
   }
 
   const expectedAttempt = preflight.attempt;
-  while (expectedAttempt < MAX_PROVIDER_ATTEMPTS) {
-    const claim = await dependencies.claimAttempt(runId, expectedAttempt);
-    if (claim.status === "busy" || claim.status === "stale") {
-      return;
-    }
-    if (claim.status === "exhausted") {
-      await handoff(
-        dependencies,
-        runId,
-        "provider_retry_exhausted",
-        "provider_retry_exhausted",
-        "The answer provider retry budget was exhausted.",
-      );
-      return;
-    }
-
-    const attempt = claim.attempt;
-    try {
-      const candidate = validateCandidateAnswer(
-        await dependencies.generateCandidate({
-          runId,
-          attempt,
-          threadId: synchronized.threadId,
-          promptMessageId: synchronized.promptMessageId,
-          instructions: buildGroundingInstructions(evidence),
-        }),
-        evidence,
-      );
-      if (!candidate.ok) {
-        await handoff(
-          dependencies,
-          runId,
-          candidate.reason,
-          candidate.reason,
-          "The generated answer did not pass evidence validation.",
-        );
-        return;
-      }
-
-      const committed = await dependencies.commitCandidate({
-        runId,
-        attempt,
-        segments: candidate.segments,
-        evidence: candidate.evidence,
-      });
-      if (committed.status === "invalid_evidence") {
-        await handoff(
-          dependencies,
-          runId,
-          "invalid_citation",
-          "invalid_citation",
-          "Retrieved citations were no longer valid at commit time.",
-        );
-      }
-      return;
-    } catch (error) {
-      const failure = classifyProviderFailure(error);
-      if (failure.retryable && attempt < MAX_PROVIDER_ATTEMPTS) {
-        const prepared = await dependencies.prepareRetry({
-          runId,
-          attempt,
-          errorCode: failure.code,
-          errorMessage: failure.safeMessage,
-        });
-        if (!prepared) {
-          return;
-        }
-        // prepareRetry transactionally schedules the next responder action.
-        // Return so durability never depends on this at-most-once action.
-        return;
-      }
-      await handoff(
-        dependencies,
-        runId,
-        failure.retryable ? "provider_retry_exhausted" : failure.code,
-        failure.code,
-        failure.safeMessage,
-      );
-      return;
-    }
+  if (expectedAttempt >= MAX_PROVIDER_ATTEMPTS) {
+    await handoff(
+      dependencies,
+      runId,
+      "provider_retry_exhausted",
+      "provider_retry_exhausted",
+      "The answer provider retry budget was exhausted.",
+    );
+    return;
   }
 
-  await handoff(
-    dependencies,
-    runId,
-    "provider_retry_exhausted",
-    "provider_retry_exhausted",
-    "The answer provider retry budget was exhausted.",
-  );
+  const claim = await dependencies.claimAttempt(runId, expectedAttempt);
+  if (claim.status === "busy" || claim.status === "stale") {
+    return;
+  }
+  if (claim.status === "exhausted") {
+    await handoff(
+      dependencies,
+      runId,
+      "provider_retry_exhausted",
+      "provider_retry_exhausted",
+      "The answer provider retry budget was exhausted.",
+    );
+    return;
+  }
+
+  const attempt = claim.attempt;
+  try {
+    const candidate = validateCandidateAnswer(
+      await dependencies.generateCandidate({
+        runId,
+        attempt,
+        threadId: synchronized.threadId,
+        promptMessageId: synchronized.promptMessageId,
+        instructions: buildGroundingInstructions(evidence),
+      }),
+      evidence,
+    );
+    if (!candidate.ok) {
+      await handoff(
+        dependencies,
+        runId,
+        candidate.reason,
+        candidate.reason,
+        "The generated answer did not pass evidence validation.",
+      );
+      return;
+    }
+
+    const committed = await dependencies.commitCandidate({
+      runId,
+      attempt,
+      segments: candidate.segments,
+      evidence: candidate.evidence,
+    });
+    if (committed.status === "invalid_evidence") {
+      await handoff(
+        dependencies,
+        runId,
+        "invalid_citation",
+        "invalid_citation",
+        "Retrieved citations were no longer valid at commit time.",
+      );
+    }
+  } catch (error) {
+    const failure = classifyProviderFailure(error);
+    if (failure.retryable && attempt < MAX_PROVIDER_ATTEMPTS) {
+      const prepared = await dependencies.prepareRetry({
+        runId,
+        attempt,
+        errorCode: failure.code,
+        errorMessage: failure.safeMessage,
+      });
+      if (!prepared) {
+        return;
+      }
+      // prepareRetry transactionally schedules the next responder action.
+      // Return so durability never depends on this at-most-once action.
+      return;
+    }
+    await handoff(
+      dependencies,
+      runId,
+      failure.retryable ? "provider_retry_exhausted" : failure.code,
+      failure.code,
+      failure.safeMessage,
+    );
+    return;
+  }
 }

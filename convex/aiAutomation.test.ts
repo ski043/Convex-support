@@ -6,6 +6,7 @@ import { makeFunctionReference } from "convex/server";
 import type { GenericId } from "convex/values";
 import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
+import { components } from "./_generated/api";
 import {
   invalidateForResolveInTransaction,
   type QueueVisitorResult,
@@ -534,6 +535,14 @@ describe("AI run concurrency and idempotency", () => {
       body: "Can you help with my order?",
       context: {},
     });
+    const remainingWorkspaceRequests = await t.run(async (ctx) =>
+      ctx.runQuery(components.rateLimiter.lib.getValue, {
+        name: "aiWorkspaceGenerationRequests",
+        key: workspaceId,
+        config: { kind: "fixed window", rate: 60, period: 60 * 60 * 1_000 },
+      }),
+    );
+    expect(remainingWorkspaceRequests.value).toBe(60);
     const queued = await t.run(async (ctx) => {
       const conversation = await ctx.db
         .query("conversations")
@@ -1358,6 +1367,18 @@ describe("AI run concurrency and idempotency", () => {
     await t.withIdentity(ownerIdentity).mutation(takeOver, {
       conversationId: fixture.conversationId,
     });
+    await t.run(async (ctx) => {
+      const state = await ctx.db
+        .query("aiConversationStates")
+        .withIndex("by_conversationId", (q) =>
+          q.eq("conversationId", fixture.conversationId),
+        )
+        .unique();
+      if (!state) throw new Error("Expected automation state");
+      await ctx.db.patch("aiConversationStates", state._id, {
+        consecutiveAiFailures: 2,
+      });
+    });
     expect(
       await t.mutation(commitCandidate, {
         runId,
@@ -1378,7 +1399,11 @@ describe("AI run concurrency and idempotency", () => {
         )
         .unique(),
     );
-    expect(state).toMatchObject({ mode: "ai", generationEpoch: 3 });
+    expect(state).toMatchObject({
+      mode: "ai",
+      generationEpoch: 3,
+      consecutiveAiFailures: 0,
+    });
   });
 
   test("resume after an owner answer only enables AI for the next visitor", async () => {

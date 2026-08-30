@@ -292,33 +292,46 @@ const loaderSource = String.raw`(function () {
     }
   }
 
-  fetch(widgetOrigin + "/api/widget-bootstrap", {
-    method: "POST",
-    mode: "cors",
-    credentials: "omit",
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId: workspaceId })
-  })
-    .then(function (response) {
-      if (!response.ok) throw new Error("bootstrap rejected");
-      return response.json();
+  function requestBootstrap(attempt) {
+    fetch(widgetOrigin + "/api/widget-bootstrap", {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspaceId })
     })
-    .then(function (result) {
-      if (
-        !result ||
-        typeof result.bootstrapToken !== "string" ||
-        !result.bootstrapToken ||
-        result.bootstrapToken.length > 4096
-      ) {
-        throw new Error("invalid bootstrap");
-      }
-      bootstrapToken = result.bootstrapToken;
-      mountWhenReady();
-    })
-    .catch(function () {
-      window[BOOT_FLAG] = false;
-    });
+      .then(function (response) {
+        if (!response.ok) throw new Error("bootstrap rejected");
+        return response.json();
+      })
+      .then(function (result) {
+        if (
+          !result ||
+          typeof result.bootstrapToken !== "string" ||
+          !result.bootstrapToken ||
+          result.bootstrapToken.length > 4096
+        ) {
+          throw new Error("invalid bootstrap");
+        }
+        bootstrapToken = result.bootstrapToken;
+        mountWhenReady();
+      })
+      .catch(function (error) {
+        if (attempt < 3) {
+          window.setTimeout(function () {
+            requestBootstrap(attempt + 1);
+          }, attempt * 300);
+          return;
+        }
+        window[BOOT_FLAG] = false;
+        if (window.console && typeof window.console.warn === "function") {
+          window.console.warn("Support widget bootstrap failed after 3 attempts.", error);
+        }
+      });
+  }
+
+  requestBootstrap(1);
 })();`;
 
 export async function GET() {

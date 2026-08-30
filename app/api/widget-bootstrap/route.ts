@@ -41,43 +41,59 @@ export async function OPTIONS(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const origin = normalizeWidgetOrigin(request.headers.get("origin"));
-  if (!origin) return reject(null, 400);
+  const requestOrigin = normalizeWidgetOrigin(request.headers.get("origin"));
+  if (!requestOrigin) return reject(null, 400);
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
-    return reject(origin, 415);
+    return reject(requestOrigin, 415);
   }
 
   let workspaceId: string;
+  let policyOrigin = requestOrigin;
   try {
     const body: unknown = await request.json();
-    if (!body || typeof body !== "object") return reject(origin, 400);
+    if (!body || typeof body !== "object") return reject(requestOrigin, 400);
     const candidate = (body as Record<string, unknown>).workspaceId;
     if (typeof candidate !== "string" || !workspacePattern.test(candidate)) {
-      return reject(origin, 400);
+      return reject(requestOrigin, 400);
     }
     workspaceId = candidate;
+
+    const serverOrigin = normalizeWidgetOrigin(new URL(request.url).origin);
+    const parentOrigin = normalizeWidgetOrigin(
+      typeof (body as Record<string, unknown>).parentOrigin === "string"
+        ? ((body as Record<string, unknown>).parentOrigin as string)
+        : null,
+    );
+    // A widget iframe can renew a consumed or expired bootstrap token. Only
+    // same-origin callers may supply the embedding page origin; cross-origin
+    // loader requests are always authorized against their actual Origin.
+    if (serverOrigin === requestOrigin && parentOrigin) {
+      policyOrigin = parentOrigin;
+    }
   } catch {
-    return reject(origin, 400);
+    return reject(requestOrigin, 400);
   }
 
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
   const secret = process.env.WIDGET_BOOTSTRAP_SECRET;
-  if (!convexUrl || !secret || secret.length < 32) return reject(origin, 503);
+  if (!convexUrl || !secret || secret.length < 32) {
+    return reject(requestOrigin, 503);
+  }
 
   try {
     const client = new ConvexHttpClient(convexUrl);
     const policy = await client.query(api.widgetBootstrap.getPolicy, {
       workspaceId: workspaceId as Id<"workspaces">,
-      origin,
+      origin: policyOrigin,
     });
-    if (!policy?.allowed) return reject(origin);
+    if (!policy?.allowed) return reject(requestOrigin);
 
     const issuedAt = Date.now();
     const bootstrapToken = await signWidgetBootstrap(
       {
         version: WIDGET_BOOTSTRAP_VERSION,
         workspaceId,
-        origin,
+        origin: policyOrigin,
         policyVersion: policy.policyVersion,
         issuedAt,
         expiresAt: issuedAt + WIDGET_BOOTSTRAP_TTL_MS,
@@ -87,9 +103,9 @@ export async function POST(request: Request) {
     );
     return Response.json(
       { bootstrapToken, expiresAt: issuedAt + WIDGET_BOOTSTRAP_TTL_MS },
-      { headers: corsHeaders(origin) },
+      { headers: corsHeaders(requestOrigin) },
     );
   } catch {
-    return reject(origin);
+    return reject(requestOrigin);
   }
 }

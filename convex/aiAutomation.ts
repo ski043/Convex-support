@@ -79,6 +79,12 @@ const invalidateDisabledWorkspaceStatesReference = makeFunctionReference<
   null
 >("aiAutomation:invalidateDisabledWorkspaceStates");
 
+const consumeGenerationLimitsReference = makeFunctionReference<
+  "mutation",
+  { workspaceId: Id<"workspaces"> },
+  null
+>("aiAutomation:consumeGenerationLimits");
+
 const LEGACY_DEFAULT_HANDOFF_MESSAGE =
   "I’m not confident I can answer that from the available information. A human will continue here.";
 const DEFAULT_HANDOFF_MESSAGE =
@@ -106,6 +112,12 @@ const DAILY_WORKSPACE_TOKEN_CEILING = 2_000_000;
 const MONTHLY_WORKSPACE_TOKEN_CEILING = 20_000_000;
 const RESERVED_TOKENS_PER_GENERATION = 8_000;
 const DISABLE_INVALIDATION_BATCH_SIZE = 25;
+const GENERATION_LIMIT_ERROR_PREFIX = "AI_GENERATION_LIMIT:";
+const generationRateLimitReasons = [
+  "limit_workspace_requests",
+  "limit_global_requests",
+  "limit_workspace_tokens",
+] as const;
 
 async function scheduleQueuedResponder(
   ctx: MutationCtx,
@@ -361,26 +373,6 @@ async function applyGenerationLimits(
   ctx: MutationCtx,
   workspaceId: Id<"workspaces">,
 ) {
-  try {
-    const [workspaceRequests, globalRequests, tokenReservation] =
-      await Promise.all([
-        generationRateLimiter.limit(ctx, "aiWorkspaceGenerationRequests", {
-          key: workspaceId,
-        }),
-        generationRateLimiter.limit(ctx, "aiGlobalGenerationRequests"),
-        generationRateLimiter.limit(ctx, "aiWorkspaceTokenReservations", {
-          key: workspaceId,
-          count: RESERVED_TOKENS_PER_GENERATION,
-        }),
-      ]);
-    if (!workspaceRequests.ok) return "limit_workspace_requests";
-    if (!globalRequests.ok) return "limit_global_requests";
-    if (!tokenReservation.ok) return "limit_workspace_tokens";
-  } catch (error) {
-    console.error("AI rate limiter failed closed", error);
-    return "limit_system_unavailable";
-  }
-
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
   const month = day.slice(0, 7);
@@ -419,8 +411,51 @@ async function applyGenerationLimits(
   if (queued.length + running.length >= MAX_WORKSPACE_CONCURRENT_RUNS) {
     return "limit_workspace_concurrency";
   }
+
+  try {
+    await ctx.runMutation(consumeGenerationLimitsReference, { workspaceId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const reason = generationRateLimitReasons.find((candidate) =>
+      message.includes(`${GENERATION_LIMIT_ERROR_PREFIX}${candidate}`),
+    );
+    if (reason) return reason;
+    console.error("AI rate limiter failed closed", error);
+    return "limit_system_unavailable";
+  }
   return null;
 }
+
+export const consumeGenerationLimits = internalMutation({
+  args: { workspaceId: v.id("workspaces") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const [workspaceRequests, globalRequests, tokenReservation] =
+      await Promise.all([
+        generationRateLimiter.limit(ctx, "aiWorkspaceGenerationRequests", {
+          key: args.workspaceId,
+        }),
+        generationRateLimiter.limit(ctx, "aiGlobalGenerationRequests"),
+        generationRateLimiter.limit(ctx, "aiWorkspaceTokenReservations", {
+          key: args.workspaceId,
+          count: RESERVED_TOKENS_PER_GENERATION,
+        }),
+      ]);
+    const reason = !workspaceRequests.ok
+      ? "limit_workspace_requests"
+      : !globalRequests.ok
+        ? "limit_global_requests"
+        : !tokenReservation.ok
+          ? "limit_workspace_tokens"
+          : null;
+    if (reason) {
+      // Throwing rolls back every limiter write in this nested mutation, so a
+      // rejected generation never consumes any of the other quotas.
+      throw new Error(`${GENERATION_LIMIT_ERROR_PREFIX}${reason}`);
+    }
+    return null;
+  },
+});
 
 export type QueueVisitorResult =
   | { queued: true; runId: Id<"aiRuns">; epoch: number }
@@ -581,7 +616,7 @@ export async function queueVisitorMessageInTransaction(
     generationEpoch: epoch,
     activeRunId: runId,
     handoffReason: undefined,
-    ...(args.reopened ? { consecutiveAiFailures: 0 } : {}),
+    ...(args.reopened || args.forceAi ? { consecutiveAiFailures: 0 } : {}),
     updatedAt: now,
   });
   await scheduleQueuedResponder(ctx, {
