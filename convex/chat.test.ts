@@ -25,7 +25,7 @@ type ContextInput = {
 type MessageItem = {
   _id: GenericId<"messages">;
   sequence: number;
-  author: "visitor" | "owner" | "system";
+  author: "visitor" | "owner" | "assistant" | "system";
   body: string;
   createdAt: number;
 };
@@ -77,6 +77,11 @@ const listConversations = makeFunctionReference<
     _id: ConversationId;
     status: "open" | "resolved";
     unreadCount: number;
+    handlingState: "ai_handling" | "human_handling" | "needs_human" | "resolved";
+    attentionState: "none" | "needs_human";
+    isAiTyping: boolean;
+    canTakeOver: boolean;
+    canResume: boolean;
     lastMessage: { author: MessageItem["author"]; body: string; createdAt: number };
     visitor: {
       city: string | null;
@@ -375,7 +380,15 @@ describe("owner inbox and conversation lifecycle", () => {
       context: emptyContext,
     });
     const beforeRead = await owner.query(listConversations, { paginationOpts: page });
-    expect(beforeRead.page[0].unreadCount).toBe(1);
+    expect(beforeRead.page[0]).toMatchObject({
+      status: "open",
+      unreadCount: 1,
+      handlingState: "human_handling",
+      attentionState: "none",
+      isAiTyping: false,
+      canTakeOver: false,
+      canResume: false,
+    });
     await owner.mutation(markRead, { conversationId: conversation._id });
     const afterRead = await owner.query(listConversations, { paginationOpts: page });
     expect(afterRead.page[0].unreadCount).toBe(0);
@@ -385,6 +398,16 @@ describe("owner inbox and conversation lifecycle", () => {
       clientMessageId: "00000000-0000-4000-8000-000000000043",
     });
     expect(resolved).toMatchObject({ author: "system", sequence: 4 });
+    expect(
+      (await owner.query(listConversations, { paginationOpts: page })).page[0],
+    ).toMatchObject({
+      status: "resolved",
+      handlingState: "resolved",
+      attentionState: "none",
+      isAiTyping: false,
+      canTakeOver: false,
+      canResume: false,
+    });
     await t.mutation(sendMessage, {
       workspaceId,
       token: session.token,

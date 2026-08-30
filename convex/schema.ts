@@ -102,6 +102,8 @@ export default defineSchema({
     widgetSettingsValidator.extend({
       ownerTokenIdentifier: v.string(),
       workspaceId: v.optional(v.id("workspaces")),
+      // Optional only for pre-enforcement workspaces. Runtime policy treats an
+      // enforced empty list as deny-all, never as allow-all.
       allowedOrigins: v.optional(v.array(v.string())),
       originPolicy: v.optional(
         v.union(v.literal("legacy_limited"), v.literal("enforced")),
@@ -159,7 +161,9 @@ export default defineSchema({
   workspaceAiSettings: defineTable({
     workspaceId: v.id("workspaces"),
     enabled: v.boolean(),
-    answerModel: v.literal("openai/gpt-5.6-terra"),
+    // Persisted model identifiers are historical/configuration data. Public
+    // mutations still validate the currently supported model selection.
+    answerModel: v.string(),
     handoffMessage: v.string(),
     updatedAt: v.number(),
   }).index("by_workspaceId", ["workspaceId"]),
@@ -226,7 +230,7 @@ export default defineSchema({
     triggerMessageId: v.id("messages"),
     epoch: v.number(),
     status: aiRunStatusValidator,
-    model: v.literal("openai/gpt-5.6-terra"),
+    model: v.string(),
     attempt: v.number(),
     dispatchRecoveryCount: v.optional(v.number()),
     errorCode: v.optional(v.string()),
@@ -305,5 +309,6 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_nonce", ["nonce"])
+    .index("by_expiresAt", ["expiresAt"])
     .index("by_workspaceId_and_createdAt", ["workspaceId", "createdAt"]),
 });

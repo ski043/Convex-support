@@ -374,7 +374,7 @@ export function toConversationItem(
     attentionState: attention,
     isAiTyping: automation?.isAiTyping ?? false,
     canTakeOver: conversation.status === "open" && mode === "ai",
-    canResume: conversation.status === "open" && mode !== "ai",
+    canResume: conversation.status === "open" && automation?.mode === "human",
     visitor: toVisitorSnapshot(visitor),
   };
 }
