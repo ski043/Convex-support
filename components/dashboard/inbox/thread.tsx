@@ -59,6 +59,34 @@ function messageTime(timestamp: number) {
   }).format(timestamp);
 }
 
+function messagePresentation(
+  author: Exclude<InboxMessage["author"], "system">,
+) {
+  switch (author) {
+    case "visitor":
+      return {
+        align: "start" as const,
+        header: "Visitor",
+        scrollAnchor: false,
+        variant: "muted" as const,
+      };
+    case "owner":
+      return {
+        align: "end" as const,
+        header: "You",
+        scrollAnchor: true,
+        variant: "default" as const,
+      };
+    case "assistant":
+      return {
+        align: "start" as const,
+        header: "AI assistant",
+        scrollAnchor: false,
+        variant: "muted" as const,
+      };
+  }
+}
+
 function ThreadLoading() {
   return (
     <>
@@ -174,22 +202,21 @@ export function Thread({
                 );
               }
 
-              const fromOwner = message.author === "owner";
-              const align = fromOwner ? "end" : "start";
+              const presentation = messagePresentation(message.author);
 
               return (
                 <Fragment key={message._id}>
                   {dateMarker}
                   <MessageScrollerItem
                     messageId={message._id}
-                    scrollAnchor={fromOwner}
+                    scrollAnchor={presentation.scrollAnchor}
                   >
-                    <Message align={align}>
+                    <Message align={presentation.align}>
                       <MessageContent>
-                        <MessageHeader>{fromOwner ? "You" : "Visitor"}</MessageHeader>
+                        <MessageHeader>{presentation.header}</MessageHeader>
                         <Bubble
-                          variant={fromOwner ? "default" : "muted"}
-                          align={align}
+                          variant={presentation.variant}
+                          align={presentation.align}
                         >
                           <BubbleContent>{message.body}</BubbleContent>
                         </Bubble>

@@ -40,10 +40,15 @@ import { cn } from "@/lib/utils";
 
 function conversationPreview(conversation: InboxConversation) {
   if (!conversation.lastMessage) return "No messages yet";
-  if (conversation.lastMessage.author === "owner") {
-    return `You: ${conversation.lastMessage.body}`;
+  switch (conversation.lastMessage.author) {
+    case "owner":
+      return `You: ${conversation.lastMessage.body}`;
+    case "assistant":
+      return `AI: ${conversation.lastMessage.body}`;
+    case "visitor":
+    case "system":
+      return conversation.lastMessage.body;
   }
-  return conversation.lastMessage.body;
 }
 
 function relativeTime(timestamp: number, now: number) {

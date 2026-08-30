@@ -47,5 +47,15 @@ export const conversationItemValidator = v.object({
     createdAt: v.number(),
   }),
   unreadCount: v.number(),
+  handlingState: v.union(
+    v.literal("ai_handling"),
+    v.literal("needs_human"),
+    v.literal("human_handling"),
+    v.literal("resolved"),
+  ),
+  attentionState: v.union(v.literal("none"), v.literal("needs_human")),
+  isAiTyping: v.boolean(),
+  canTakeOver: v.boolean(),
+  canResume: v.boolean(),
   visitor: visitorSnapshotValidator,
 });
