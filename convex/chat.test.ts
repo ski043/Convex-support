@@ -965,6 +965,18 @@ describe("context, idempotency, and capability expiry", () => {
       return visitor?.capabilityExpiresAt ?? 0;
     });
     expect(renewedExpiry).toBeGreaterThanOrEqual(Date.now() + CAPABILITY_TTL_MS - 1_000);
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_origin", (q) =>
+            q
+              .eq("workspaceId", workspaceId)
+              .eq("origin", TEST_WIDGET_ORIGIN),
+          )
+          .unique(),
+      ),
+    ).toMatchObject({ sessionCount: 1 });
 
     await t.run(async (ctx) => {
       const visitor = await ctx.db

@@ -49,6 +49,10 @@ history and never commit values to `.env*` files.
    list of more than 20 observations is explicitly incomplete. Saving changes
    the workspace from bounded legacy compatibility to enforced origin
    allowlisting; the list can be corrected and saved again from the dashboard.
+   If an installed site was missed, **Restart origin discovery** temporarily
+   returns the workspace to legacy-limited mode and clears the bounded
+   100-origin observation history so the owner can rebuild and re-enforce the
+   list.
 5. In **Knowledge**, upload a small selectable-text fixture and wait for
    `Ready`. Confirm a failed/scanned fixture remains unsearchable.
 6. Leave AI paused while verifying a no-answer case and an answerable case in a

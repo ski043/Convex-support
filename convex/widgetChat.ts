@@ -7,7 +7,7 @@ import { v } from "convex/values";
 import { DAY, HOUR, MINUTE, RateLimiter } from "@convex-dev/rate-limiter";
 import type { Id } from "./_generated/dataModel";
 import { components } from "./_generated/api";
-import { env, mutation, query, type MutationCtx } from "./_generated/server";
+import { env, mutation, query } from "./_generated/server";
 import {
   CAPABILITY_EXPIRY_SCHEDULE_STEP_MS,
   CAPABILITY_TTL_MS,
@@ -33,6 +33,7 @@ import { widgetSettingsValidator } from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
 import { verifyWidgetBootstrap } from "../lib/widget-bootstrap-token";
 import { queueVisitorMessageInTransaction } from "./aiAutomation";
+import { recordWidgetOriginObservation } from "./widgetOriginModel";
 
 const defaultWidgetSettings = {
   displayName: "MarshalDesk support",
@@ -76,34 +77,6 @@ const widgetRateLimiter = new RateLimiter(components.rateLimiter, {
     shards: 5,
   },
 });
-
-export async function recordWidgetOriginObservation(
-  ctx: MutationCtx,
-  workspaceId: Id<"workspaces">,
-  origin: string,
-  now: number,
-) {
-  const existing = await ctx.db
-    .query("widgetOriginObservations")
-    .withIndex("by_workspaceId_and_origin", (q) =>
-      q.eq("workspaceId", workspaceId).eq("origin", origin),
-    )
-    .unique();
-  if (existing) {
-    await ctx.db.patch("widgetOriginObservations", existing._id, {
-      sessionCount: existing.sessionCount + 1,
-      lastSeenAt: now,
-    });
-    return;
-  }
-  await ctx.db.insert("widgetOriginObservations", {
-    workspaceId,
-    origin,
-    sessionCount: 1,
-    firstSeenAt: now,
-    lastSeenAt: now,
-  });
-}
 
 async function requireValidBootstrap(
   ctx: Parameters<typeof getWidgetOriginPolicy>[0],
@@ -220,6 +193,7 @@ export const ensureSession = mutation({
         args.workspaceId,
         claims.origin,
         now,
+        false,
       );
       await ctx.scheduler.runAt(
         Math.min(capabilityExpiresAt, now + CAPABILITY_EXPIRY_SCHEDULE_STEP_MS),

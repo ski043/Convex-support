@@ -12,8 +12,12 @@ import type { GroundedAnswerSegment, RetrievedEvidence } from "./aiModel";
 import { knowledgeNamespace } from "./knowledgeModel";
 import schema from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
-import { recordWidgetOriginObservation } from "./widgetChat";
 import { getRecentWidgetOriginObservations } from "./widgetSettings";
+import {
+  clearWidgetOriginObservations,
+  MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE,
+  recordWidgetOriginObservation,
+} from "./widgetOriginModel";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -1024,6 +1028,7 @@ describe("widget origin enforcement guidance", () => {
         },
       ],
       isTruncated: false,
+      isAtCapacity: false,
     });
   });
 
@@ -1045,8 +1050,61 @@ describe("widget origin enforcement guidance", () => {
       getRecentWidgetOriginObservations(ctx, workspaceId),
     );
     expect(result.isTruncated).toBe(true);
+    expect(result.isAtCapacity).toBe(false);
     expect(result.origins).toHaveLength(20);
     expect(result.origins[0]?.origin).toBe("https://site-20.example.com");
     expect(result.origins.at(-1)?.origin).toBe("https://site-1.example.com");
+  });
+
+  test("origin observations are bounded and can be cleared for rediscovery", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-origin-cap");
+    await t.run(async (ctx) => {
+      for (
+        let index = 0;
+        index < MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 1;
+        index += 1
+      ) {
+        await recordWidgetOriginObservation(
+          ctx,
+          workspaceId,
+          `https://bounded-${index}.example.com`,
+          index,
+        );
+      }
+    });
+
+    expect(
+      (
+        await t.run(async (ctx) =>
+          getRecentWidgetOriginObservations(ctx, workspaceId),
+        )
+      ).isAtCapacity,
+    ).toBe(true);
+
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+            q.eq("workspaceId", workspaceId),
+          )
+          .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 1),
+      ),
+    ).toHaveLength(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
+
+    await t.run(async (ctx) =>
+      clearWidgetOriginObservations(ctx, workspaceId),
+    );
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+            q.eq("workspaceId", workspaceId),
+          )
+          .take(1),
+      ),
+    ).toEqual([]);
   });
 });

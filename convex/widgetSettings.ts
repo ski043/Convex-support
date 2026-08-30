@@ -8,6 +8,10 @@ import {
   findWorkspaceByAuthUserId,
 } from "./workspaceModel";
 import { normalizeWidgetOrigin } from "../lib/widget-bootstrap-token";
+import {
+  clearWidgetOriginObservations,
+  MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE,
+} from "./widgetOriginModel";
 
 const MAX_DISPLAY_NAME_LENGTH = 40;
 const MAX_GREETING_LENGTH = 120;
@@ -45,7 +49,7 @@ export async function getRecentWidgetOriginObservations(
       q.eq("workspaceId", workspaceId),
     )
     .order("desc")
-    .take(MAX_ALLOWED_ORIGINS + 1);
+    .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
   return {
     origins: observations.slice(0, MAX_ALLOWED_ORIGINS).map((observation) => ({
       origin: observation.origin,
@@ -54,6 +58,8 @@ export async function getRecentWidgetOriginObservations(
       lastSeenAt: observation.lastSeenAt,
     })),
     isTruncated: observations.length > MAX_ALLOWED_ORIGINS,
+    isAtCapacity:
+      observations.length >= MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE,
   };
 }
 
@@ -182,11 +188,14 @@ export const getRecentOrigins = query({
       }),
     ),
     isTruncated: v.boolean(),
+    isAtCapacity: v.boolean(),
   }),
   handler: async (ctx) => {
     const { authUser } = await requireOwner(ctx);
     const workspace = await findWorkspaceByAuthUserId(ctx, authUser._id);
-    if (!workspace) return { origins: [], isTruncated: false };
+    if (!workspace) {
+      return { origins: [], isTruncated: false, isAtCapacity: false };
+    }
     return await getRecentWidgetOriginObservations(ctx, workspace._id);
   },
 });
@@ -235,6 +244,49 @@ export const saveSecurity = mutation({
         updatedAt,
       });
     }
+    return null;
+  },
+});
+
+export const restartSecuritySetup = mutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const { authUser, ownerTokenIdentifier } = await requireOwner(ctx);
+    const workspaceId = await ensureWorkspaceForAuthUser(ctx, authUser);
+    const workspaceSettings = await ctx.db
+      .query("widgetSettings")
+      .withIndex("by_workspaceId", (q) => q.eq("workspaceId", workspaceId))
+      .unique();
+    const existing =
+      workspaceSettings ??
+      (await ctx.db
+        .query("widgetSettings")
+        .withIndex("by_ownerTokenIdentifier", (q) =>
+          q.eq("ownerTokenIdentifier", ownerTokenIdentifier),
+        )
+        .unique());
+    const updatedAt = Date.now();
+
+    if (existing) {
+      await ctx.db.patch("widgetSettings", existing._id, {
+        workspaceId,
+        originPolicy: "legacy_limited",
+        securityUpdatedAt: updatedAt,
+        updatedAt,
+      });
+    } else {
+      await ctx.db.insert("widgetSettings", {
+        ownerTokenIdentifier,
+        workspaceId,
+        ...defaultWidgetSettings,
+        originPolicy: "legacy_limited",
+        securityUpdatedAt: updatedAt,
+        updatedAt,
+      });
+    }
+
+    await clearWidgetOriginObservations(ctx, workspaceId);
     return null;
   },
 });

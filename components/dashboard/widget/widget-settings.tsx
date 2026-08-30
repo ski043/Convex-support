@@ -100,6 +100,16 @@ const panelColorValues: Record<WidgetTheme, string> = {
   zinc: "#3f3f46",
 };
 
+const observationTimestampFormatter = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+
+function formatObservationTimestamp(timestamp: number) {
+  return `${observationTimestampFormatter.format(new Date(timestamp))} UTC`;
+}
+
 function highlightSnippetPart(part: string, index: number) {
   if (part === "<" || part === ">" || part === "</") {
     return (
@@ -160,6 +170,9 @@ function OriginSecuritySettings({
   initialPolicy: OriginPolicy;
 }) {
   const saveSecurity = useMutation(api.widgetSettings.saveSecurity);
+  const restartSecuritySetup = useMutation(
+    api.widgetSettings.restartSecuritySetup,
+  );
   const recentOriginState = useQuery(api.widgetSettings.getRecentOrigins);
   const recentOrigins = recentOriginState?.origins ?? [];
   const [origins, setOrigins] = useState<OriginDraft[]>(() =>
@@ -171,6 +184,10 @@ function OriginSecuritySettings({
   const [policy, setPolicy] = useState<OriginPolicy>(initialPolicy);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [restartStep, setRestartStep] = useState<
+    "idle" | "confirming" | "saving" | "error"
+  >("idle");
+  const [restartError, setRestartError] = useState<string | null>(null);
   const nextOriginId = useRef(origins.length);
 
   function updateOrigin(id: string, value: string) {
@@ -244,6 +261,28 @@ function OriginSecuritySettings({
     }
   }
 
+  async function handleRestartSecuritySetup() {
+    if (restartStep === "saving") return;
+    setRestartStep("saving");
+    setRestartError(null);
+
+    try {
+      await restartSecuritySetup({});
+      setPolicy("legacy_limited");
+      setRestartStep("idle");
+      setSaveStatus("idle");
+      setSaveError(null);
+    } catch (error) {
+      setRestartStep("error");
+      setRestartError(
+        ownerSafeError(
+          error,
+          "We couldn’t restart origin discovery. Enforcement is still active.",
+        ),
+      );
+    }
+  }
+
   return (
     <Card className="gap-0 py-0">
       <CardHeader className="border-b py-(--card-spacing)">
@@ -304,7 +343,12 @@ function OriginSecuritySettings({
               );
             })}
 
-            {recentOrigins.length > 0 ? (
+            {recentOriginState === undefined ? (
+              <FieldDescription className="flex items-center gap-2">
+                <Spinner aria-hidden className="size-3.5" />
+                Loading browser-reported origins…
+              </FieldDescription>
+            ) : recentOrigins.length > 0 ? (
               <FieldSet>
                 <FieldLegend variant="label">
                   Unverified browser-reported origins
@@ -332,8 +376,8 @@ function OriginSecuritySettings({
                         <span className="block text-[11px] text-muted-foreground">
                           {observation.sessionCount} session bootstrap
                           {observation.sessionCount === 1 ? "" : "s"} · first{" "}
-                          {new Date(observation.firstSeenAt).toISOString()} · last{" "}
-                          {new Date(observation.lastSeenAt).toISOString()}
+                          {formatObservationTimestamp(observation.firstSeenAt)} · last{" "}
+                          {formatObservationTimestamp(observation.lastSeenAt)}
                         </span>
                       </span>
                     </Button>
@@ -345,7 +389,13 @@ function OriginSecuritySettings({
                   origin and activity with your actual site configuration before adding
                   it.
                 </FieldDescription>
-                {recentOriginState?.isTruncated ? (
+                {recentOriginState?.isAtCapacity ? (
+                  <FieldDescription className="text-destructive">
+                    The 100-origin safety cap has been reached, so additional
+                    origins are not recorded. Verify your configuration or restart
+                    discovery to clear this unverified history.
+                  </FieldDescription>
+                ) : recentOriginState?.isTruncated ? (
                   <FieldDescription className="text-destructive">
                     More than 20 origins have reported activity. This list shows only
                     the 20 most recent and is incomplete.
@@ -362,6 +412,70 @@ function OriginSecuritySettings({
           </FieldGroup>
 
           {saveError ? <FieldError>{saveError}</FieldError> : null}
+
+          {policy === "enforced" ? (
+            restartStep === "idle" ? (
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Missing an installed site? Restart discovery to temporarily allow
+                  new origins and rebuild the unverified observation list.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => {
+                    setRestartStep("confirming");
+                    setRestartError(null);
+                  }}
+                >
+                  Restart origin discovery
+                </Button>
+              </div>
+            ) : (
+              <Alert variant="destructive">
+                <AlertTriangleIcon aria-hidden />
+                <AlertTitle>Temporarily disable origin enforcement?</AlertTitle>
+                <AlertDescription className="space-y-3">
+                  <p>
+                    New widget sessions will be accepted from any browser-reported
+                    origin until you verify the rebuilt list and save it again. The
+                    current unverified observation history will be cleared.
+                  </p>
+                  {restartError ? <p>{restartError}</p> : null}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={restartStep === "saving"}
+                      onClick={() => void handleRestartSecuritySetup()}
+                    >
+                      {restartStep === "saving" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : null}
+                      {restartStep === "saving"
+                        ? "Restarting"
+                        : "Disable enforcement and clear observations"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={restartStep === "saving"}
+                      onClick={() => {
+                        setRestartStep("idle");
+                        setRestartError(null);
+                      }}
+                    >
+                      Keep enforcement
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )
+          ) : null}
 
           <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
             <Button
