@@ -422,6 +422,7 @@ export function WidgetEmbed({
     useState<PlatformContext | null | undefined>();
   const sessionInFlight = useRef(false);
   const bootstrapInFlight = useRef(false);
+  const bootstrapTimeout = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
   const lastSentContext = useRef("");
   const retryMessage = useRef<{ body: string; clientMessageId: string } | null>(
@@ -474,13 +475,17 @@ export function WidgetEmbed({
   const refreshBootstrapToken = useCallback(() => {
     if (bootstrapInFlight.current) return;
     bootstrapInFlight.current = true;
+    if (bootstrapTimeout.current) {
+      window.clearTimeout(bootstrapTimeout.current);
+    }
     setHostBootstrapToken(undefined);
     setSessionStatus("waiting");
     postToParent({
       marker: WIDGET_MESSAGE_MARKER,
       type: WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE,
     });
-    window.setTimeout(() => {
+    bootstrapTimeout.current = window.setTimeout(() => {
+      bootstrapTimeout.current = undefined;
       if (!bootstrapInFlight.current) return;
       bootstrapInFlight.current = false;
       if (mounted.current) setSessionStatus("error");
@@ -506,8 +511,13 @@ export function WidgetEmbed({
         data.bootstrapToken &&
         data.bootstrapToken.length <= 4_096
       ) {
+        if (bootstrapTimeout.current) {
+          window.clearTimeout(bootstrapTimeout.current);
+          bootstrapTimeout.current = undefined;
+        }
         bootstrapInFlight.current = false;
         setHostBootstrapToken(data.bootstrapToken);
+        setSessionStatus("waiting");
       } else {
         refreshBootstrapToken();
       }
@@ -541,6 +551,10 @@ export function WidgetEmbed({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (bootstrapTimeout.current) {
+        window.clearTimeout(bootstrapTimeout.current);
+        bootstrapTimeout.current = undefined;
+      }
     };
   }, []);
 
