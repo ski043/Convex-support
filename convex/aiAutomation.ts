@@ -1,6 +1,6 @@
 import { DAY, HOUR, RateLimiter } from "@convex-dev/rate-limiter";
 import { makeFunctionReference } from "convex/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { components } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
@@ -112,12 +112,23 @@ const DAILY_WORKSPACE_TOKEN_CEILING = 2_000_000;
 const MONTHLY_WORKSPACE_TOKEN_CEILING = 20_000_000;
 const RESERVED_TOKENS_PER_GENERATION = 8_000;
 const DISABLE_INVALIDATION_BATCH_SIZE = 25;
-const GENERATION_LIMIT_ERROR_PREFIX = "AI_GENERATION_LIMIT:";
 const generationRateLimitReasons = [
   "limit_workspace_requests",
   "limit_global_requests",
   "limit_workspace_tokens",
 ] as const;
+type GenerationRateLimitReason = (typeof generationRateLimitReasons)[number];
+
+function generationRateLimitReason(error: unknown) {
+  if (!(error instanceof ConvexError)) return null;
+  const data: unknown = error.data;
+  if (!data || typeof data !== "object") return null;
+  const { code, reason } = data as Record<string, unknown>;
+  if (code !== "AI_GENERATION_LIMIT" || typeof reason !== "string") return null;
+  return generationRateLimitReasons.includes(reason as GenerationRateLimitReason)
+    ? (reason as GenerationRateLimitReason)
+    : null;
+}
 
 async function scheduleQueuedResponder(
   ctx: MutationCtx,
@@ -415,10 +426,7 @@ async function applyGenerationLimits(
   try {
     await ctx.runMutation(consumeGenerationLimitsReference, { workspaceId });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const reason = generationRateLimitReasons.find((candidate) =>
-      message.includes(`${GENERATION_LIMIT_ERROR_PREFIX}${candidate}`),
-    );
+    const reason = generationRateLimitReason(error);
     if (reason) return reason;
     console.error("AI rate limiter failed closed", error);
     return "limit_system_unavailable";
@@ -451,7 +459,11 @@ export const consumeGenerationLimits = internalMutation({
     if (reason) {
       // Throwing rolls back every limiter write in this nested mutation, so a
       // rejected generation never consumes any of the other quotas.
-      throw new Error(`${GENERATION_LIMIT_ERROR_PREFIX}${reason}`);
+      throw new ConvexError({
+        code: "AI_GENERATION_LIMIT",
+        reason,
+        message: "AI generation quota is unavailable.",
+      });
     }
     return null;
   },

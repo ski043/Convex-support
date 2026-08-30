@@ -467,6 +467,77 @@ describe("grounded answer state helpers", () => {
 });
 
 describe("AI run concurrency and idempotency", () => {
+  test("a rejected token reservation rolls back the other generation limits", async () => {
+    const t = makeBackend();
+    const workspaceId = await createWorkspace(t);
+    const fixture = await createConversationWithVisitorMessage(t, workspaceId);
+    await t.run(async (ctx) => {
+      const exhausted = await ctx.runMutation(
+        components.rateLimiter.lib.rateLimit,
+        {
+          name: "aiWorkspaceTokenReservations",
+          key: workspaceId,
+          count: 2_000_000,
+          config: {
+            kind: "fixed window",
+            rate: 2_000_000,
+            period: 24 * 60 * 60 * 1_000,
+            capacity: 2_000_000,
+          },
+        },
+      );
+      expect(exhausted.ok).toBe(true);
+    });
+
+    const queued = await t.mutation(queueVisitor, {
+      ...fixture,
+      reopened: false,
+    });
+    if (!queued.queued) throw new Error("Expected a limited run");
+    expect(await t.run(async (ctx) => ctx.db.get("aiRuns", queued.runId))).toMatchObject({
+      status: "queued",
+      errorCode: "limit_workspace_tokens",
+    });
+
+    const [workspaceRequests, globalRequests, tokenReservations] = await t.run(
+      async (ctx) =>
+        await Promise.all([
+          ctx.runQuery(components.rateLimiter.lib.getValue, {
+            name: "aiWorkspaceGenerationRequests",
+            key: workspaceId,
+            config: {
+              kind: "fixed window",
+              rate: 60,
+              period: 60 * 60 * 1_000,
+            },
+          }),
+          ctx.runQuery(components.rateLimiter.lib.getValue, {
+            name: "aiGlobalGenerationRequests",
+            config: {
+              kind: "token bucket",
+              rate: 1_000,
+              period: 60 * 60 * 1_000,
+              capacity: 1_000,
+              shards: 10,
+            },
+          }),
+          ctx.runQuery(components.rateLimiter.lib.getValue, {
+            name: "aiWorkspaceTokenReservations",
+            key: workspaceId,
+            config: {
+              kind: "fixed window",
+              rate: 2_000_000,
+              period: 24 * 60 * 60 * 1_000,
+              capacity: 2_000_000,
+            },
+          }),
+        ]),
+    );
+    expect(workspaceRequests.value).toBe(60);
+    expect(globalRequests.value).toBe(1_000);
+    expect(tokenReservations.value).toBe(0);
+  });
+
   test("a real workspace concurrency limit preserves the visitor message, hands off once, and still permits an owner reply", async () => {
     const t = makeBackend();
     const workspaceId = await createWorkspace(t);
