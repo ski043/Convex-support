@@ -22,7 +22,7 @@ export async function getWidgetOriginPolicy(
   return {
     allowed: mode === "legacy_limited" || allowedOrigins.includes(normalizedOrigin),
     mode,
-    policyVersion: settings?.updatedAt ?? 0,
+    policyVersion: settings?.securityUpdatedAt ?? settings?.updatedAt ?? 0,
     origin: normalizedOrigin,
   } as const;
 }

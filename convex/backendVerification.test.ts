@@ -11,6 +11,7 @@ import type { QueueVisitorResult } from "./aiAutomation";
 import type { GroundedAnswerSegment, RetrievedEvidence } from "./aiModel";
 import { knowledgeNamespace } from "./knowledgeModel";
 import schema from "./schema";
+import { getWidgetOriginPolicy } from "./widgetBootstrap";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -936,5 +937,42 @@ describe("mocked whole-feature vertical slice", () => {
     expect(snapshot.document?.status).toBe("ready");
     expect(snapshot.run?.status).toBe("accepted");
     expect(snapshot.links).toHaveLength(2);
+  });
+});
+
+describe("widget bootstrap policy versioning", () => {
+  test("appearance timestamps do not invalidate bootstrap policy", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-policy");
+    await t.run(async (ctx) => {
+      const settingsId = await ctx.db.insert("widgetSettings", {
+        ownerTokenIdentifier: ownerA.tokenIdentifier,
+        workspaceId,
+        displayName: "Support",
+        greeting: "Hello",
+        theme: "blue",
+        position: "bottomRight",
+        allowedOrigins: ["https://shop.example.com"],
+        originPolicy: "enforced",
+        securityUpdatedAt: 50,
+        updatedAt: 100,
+      });
+      expect(
+        await getWidgetOriginPolicy(
+          ctx,
+          workspaceId,
+          "https://shop.example.com",
+        ),
+      ).toMatchObject({ allowed: true, policyVersion: 50 });
+
+      await ctx.db.patch("widgetSettings", settingsId, { updatedAt: 200 });
+      expect(
+        await getWidgetOriginPolicy(
+          ctx,
+          workspaceId,
+          "https://shop.example.com",
+        ),
+      ).toMatchObject({ allowed: true, policyVersion: 50 });
+    });
   });
 });

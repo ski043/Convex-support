@@ -102,6 +102,8 @@ export const save = mutation({
       await ctx.db.patch("widgetSettings", existing._id, {
         ...args,
         workspaceId,
+        securityUpdatedAt:
+          existing.securityUpdatedAt ?? existing.updatedAt,
         updatedAt,
       });
     } else {
@@ -109,6 +111,7 @@ export const save = mutation({
         ownerTokenIdentifier,
         workspaceId,
         ...args,
+        securityUpdatedAt: 0,
         updatedAt,
       });
     }
@@ -174,6 +177,7 @@ export const saveSecurity = mutation({
       await ctx.db.patch("widgetSettings", settings._id, {
         allowedOrigins,
         originPolicy: "enforced",
+        securityUpdatedAt: updatedAt,
         updatedAt,
       });
     } else {
@@ -183,6 +187,7 @@ export const saveSecurity = mutation({
         ...defaultWidgetSettings,
         allowedOrigins,
         originPolicy: "enforced",
+        securityUpdatedAt: updatedAt,
         updatedAt,
       });
     }

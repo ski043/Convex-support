@@ -108,6 +108,7 @@ export default defineSchema({
       originPolicy: v.optional(
         v.union(v.literal("legacy_limited"), v.literal("enforced")),
       ),
+      securityUpdatedAt: v.optional(v.number()),
       updatedAt: v.number(),
     }),
   )

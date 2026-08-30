@@ -164,6 +164,22 @@ describe("mocked AI responder failure paths", () => {
     },
   );
 
+  test.each([
+    "Can a person return an order bought by someone else?",
+    "Does the operator warranty cover human error?",
+    "Which support team handles business accounts?",
+  ])(
+    "ordinary wording mentioning people still reaches knowledge search: %s",
+    async (triggerBody) => {
+      const harness = makeHarness({ triggerBody });
+
+      await runResponderOrchestration(runId, harness.dependencies);
+
+      expect(harness.dependencies.searchReadyKnowledge).toHaveBeenCalledTimes(1);
+      expect(harness.handoffs).toEqual([]);
+    },
+  );
+
   test.each(["hello", "Hi!", "good morning", "hey there"])(
     "a greeting gets a non-handoff response without knowledge search: %s",
     async (triggerBody) => {
