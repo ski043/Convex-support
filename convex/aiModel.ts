@@ -240,7 +240,7 @@ export function buildGroundingInstructions(evidence: RetrievedEvidence[]) {
 }
 
 const HUMAN_REQUEST_PATTERN =
-  /\b(?:human|person|representative|operator|live agent|real agent|support agent|customer service|support team|speak (?:to|with) (?:someone|somebody|a (?:human|person|representative|support agent))|talk (?:to|with) (?:someone|somebody|a (?:human|person|representative|support agent))|chat with (?:someone|somebody|a (?:human|person|representative|support agent))|connect me (?:to|with) (?:someone|somebody|a (?:human|person|representative|support agent))|transfer me (?:to|over to) (?:someone|somebody|a (?:human|person|representative|support agent))|mitarbeiter|mensch|echte[nr]? person|berater)\b/i;
+  /(?:\b(?:speak|talk|chat)\s+(?:to|with)\s+(?:someone|somebody|(?:an?\s+)?(?:human|person|real person|representative|operator|live agent|real agent|support agent))\b|\b(?:connect|transfer)\s+me\s+(?:to|with|over to)\s+(?:someone|somebody|(?:an?\s+)?(?:human|person|real person|representative|operator|live agent|real agent|support agent)|customer service|the support team)\b|\bi\s+(?:need|want|would like)\s+(?:an?\s+)?(?:human|real person|representative|operator|live agent|real agent|support agent)\b|\bi['’]d\s+like\s+(?:an?\s+)?(?:human|real person|representative|operator|live agent|real agent|support agent)\b|^\s*(?:human|representative|operator|live agent|real agent|support agent|customer service)(?:\s+please)?[.!?]*\s*$|\b(?:mit|zu)\s+(?:einem|einer)\s+(?:mitarbeiter(?:in)?|menschen|berater(?:in)?)\s+sprechen\b|\bverbinde\s+mich\s+(?:mit|zu)\s+(?:einem|einer)\s+(?:mitarbeiter(?:in)?|menschen|berater(?:in)?)\b)/i;
 
 export function requestsHuman(body: string) {
   return HUMAN_REQUEST_PATTERN.test(body);
