@@ -117,7 +117,7 @@ const cleanupStorage = makeFunctionReference<
 
 const sweepOrphanedStorage = makeFunctionReference<
   "mutation",
-  { cursor: string | null },
+  { cursor?: string | null; cutoff?: number },
   null
 >("knowledgeOrphans:sweep");
 
@@ -792,6 +792,59 @@ describe("knowledge recovery", () => {
           ctx.db.query("knowledgeUploadReservations").collect(),
         ),
       ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps one cutoff across scheduled orphan-sweep pages", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+      const t = backend();
+      const activatedAt = Date.now();
+      await t.run(async (ctx) =>
+        ctx.db.insert("knowledgeStorageSweepState", {
+          name: "knowledgeUploads",
+          activatedAt,
+        }),
+      );
+
+      const storageIds: StorageId[] = [];
+      for (let index = 0; index < 51; index += 1) {
+        vi.advanceTimersByTime(1);
+        storageIds.push(
+          await t.run(async (ctx) =>
+            ctx.storage.store(new Blob([`orphan-${index}`])),
+          ),
+        );
+      }
+      vi.advanceTimersByTime(24 * 60 * 60_000 + 1);
+      await t.mutation(sweepOrphanedStorage, { cursor: null });
+
+      expect(
+        await t.run(async (ctx) => {
+          const files = await Promise.all(
+            storageIds.map((storageId) =>
+              ctx.db.system.get("_storage", storageId),
+            ),
+          );
+          return files.filter(Boolean).length;
+        }),
+      ).toBe(1);
+
+      vi.advanceTimersByTime(60 * 60_000);
+      await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+      expect(
+        await t.run(async (ctx) => {
+          const files = await Promise.all(
+            storageIds.map((storageId) =>
+              ctx.db.system.get("_storage", storageId),
+            ),
+          );
+          return files.filter(Boolean).length;
+        }),
+      ).toBe(0);
     } finally {
       vi.useRealTimers();
     }

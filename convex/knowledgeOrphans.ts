@@ -21,10 +21,16 @@ async function deleteExpiredReservationBatch(
 }
 
 export const sweep = internalMutation({
-  args: { cursor: v.optional(v.union(v.string(), v.null())) },
+  args: {
+    cursor: v.optional(v.union(v.string(), v.null())),
+    cutoff: v.optional(v.number()),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const cutoff = Date.now() - ORPHAN_GRACE_MS;
+    const cutoff = args.cutoff ?? Date.now() - ORPHAN_GRACE_MS;
+    // A continuation produced by an older deployment has no stable cutoff.
+    // Restarting it is safe and prevents reusing its cursor with new bounds.
+    const cursor = args.cutoff === undefined ? null : (args.cursor ?? null);
     const sweepState = await ctx.db
       .query("knowledgeStorageSweepState")
       .withIndex("by_name", (q) => q.eq("name", "knowledgeUploads"))
@@ -39,7 +45,7 @@ export const sweep = internalMutation({
           .lt("_creationTime", cutoff),
       )
       .order("asc")
-      .paginate({ cursor: args.cursor ?? null, numItems: SWEEP_BATCH_SIZE });
+      .paginate({ cursor, numItems: SWEEP_BATCH_SIZE });
 
     for (const storedFile of page.page) {
       const registered = await ctx.db
@@ -51,7 +57,7 @@ export const sweep = internalMutation({
       }
     }
 
-    if (args.cursor == null) {
+    if (cursor == null) {
       const moreReservations = await deleteExpiredReservationBatch(ctx, cutoff);
       if (moreReservations) {
         await ctx.scheduler.runAfter(
@@ -64,6 +70,7 @@ export const sweep = internalMutation({
     if (!page.isDone) {
       await ctx.scheduler.runAfter(0, internal.knowledgeOrphans.sweep, {
         cursor: page.continueCursor,
+        cutoff,
       });
     }
     return null;
