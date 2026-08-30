@@ -202,6 +202,15 @@ export default defineSchema({
     .index("by_clientRequestId", ["clientRequestId"])
     .index("by_storageId", ["storageId"])
     .index("by_ragEntryId", ["ragEntryId"]),
+  knowledgeUploadReservations: defineTable({
+    workspaceId: v.id("workspaces"),
+    token: v.string(),
+    storageId: v.optional(v.id("_storage")),
+    createdAt: v.number(),
+  })
+    .index("by_token", ["token"])
+    .index("by_storageId", ["storageId"])
+    .index("by_createdAt", ["createdAt"]),
   aiConversationStates: defineTable({
     workspaceId: v.id("workspaces"),
     conversationId: v.id("conversations"),

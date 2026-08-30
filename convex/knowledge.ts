@@ -129,6 +129,11 @@ const registrationResultValidator = v.object({
   documentId: v.id("knowledgeDocuments"),
 });
 
+const uploadUrlResultValidator = v.object({
+  uploadUrl: v.string(),
+  reservationToken: v.string(),
+});
+
 const processingDocumentValidator = v.union(
   v.null(),
   v.object({
@@ -330,6 +335,7 @@ async function registerUpload(
         "clientRequestId was already used for a different upload.",
       );
     }
+    await releaseUploadReservation(ctx, workspace._id, args.storageId);
     return { documentId: idempotent._id };
   }
 
@@ -422,8 +428,23 @@ async function registerUpload(
     createdAt: now,
     updatedAt: now,
   });
+  await releaseUploadReservation(ctx, workspace._id, args.storageId);
   await ctx.scheduler.runAfter(0, processDocumentReference, { documentId });
   return { documentId };
+}
+
+async function releaseUploadReservation(
+  ctx: MutationCtx,
+  workspaceId: Id<"workspaces">,
+  storageId: Id<"_storage">,
+) {
+  const reservation = await ctx.db
+    .query("knowledgeUploadReservations")
+    .withIndex("by_storageId", (q) => q.eq("storageId", storageId))
+    .unique();
+  if (reservation?.workspaceId === workspaceId) {
+    await ctx.db.delete("knowledgeUploadReservations", reservation._id);
+  }
 }
 
 export const list = query({
@@ -478,7 +499,7 @@ export const list = query({
 
 export const generateUploadUrl = mutation({
   args: {},
-  returns: v.string(),
+  returns: uploadUrlResultValidator,
   handler: async (ctx) => {
     const workspace = await requireOwnerWorkspace(ctx);
     const issuanceLimit = await knowledgeRateLimiter.limit(
@@ -506,7 +527,73 @@ export const generateUploadUrl = mutation({
         "The daily knowledge upload byte limit has been reached.",
       );
     }
-    return await ctx.storage.generateUploadUrl();
+    const reservationToken = processingToken();
+    await ctx.db.insert("knowledgeUploadReservations", {
+      workspaceId: workspace._id,
+      token: reservationToken,
+      createdAt: Date.now(),
+    });
+    return {
+      uploadUrl: await ctx.storage.generateUploadUrl(),
+      reservationToken,
+    };
+  },
+});
+
+export const claimUpload = mutation({
+  args: {
+    reservationToken: v.string(),
+    storageId: v.id("_storage"),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const workspace = await requireOwnerWorkspace(ctx);
+    const reservationToken = args.reservationToken.trim().toLowerCase();
+    if (!/^[a-f0-9]{48}$/.test(reservationToken)) {
+      throw knowledgeError(
+        "UPLOAD_RESERVATION_NOT_FOUND",
+        "The upload reservation is no longer available. Upload the file again.",
+      );
+    }
+    const reservation = await ctx.db
+      .query("knowledgeUploadReservations")
+      .withIndex("by_token", (q) => q.eq("token", reservationToken))
+      .unique();
+    if (!reservation || reservation.workspaceId !== workspace._id) {
+      throw knowledgeError(
+        "UPLOAD_RESERVATION_NOT_FOUND",
+        "The upload reservation is no longer available. Upload the file again.",
+      );
+    }
+    if (reservation.storageId !== undefined) {
+      if (reservation.storageId === args.storageId) return null;
+      throw knowledgeError(
+        "UPLOAD_RESERVATION_CONFLICT",
+        "The upload reservation is already associated with another file.",
+      );
+    }
+
+    const storedFile = await ctx.db.system.get("_storage", args.storageId);
+    if (!storedFile || storedFile._creationTime < reservation.createdAt) {
+      throw knowledgeError(
+        "UPLOAD_NOT_FOUND",
+        "The uploaded file does not match this upload reservation.",
+      );
+    }
+    const existingClaim = await ctx.db
+      .query("knowledgeUploadReservations")
+      .withIndex("by_storageId", (q) => q.eq("storageId", args.storageId))
+      .unique();
+    if (existingClaim) {
+      throw knowledgeError(
+        "UPLOAD_ALREADY_CLAIMED",
+        "The uploaded file is already associated with another reservation.",
+      );
+    }
+    await ctx.db.patch("knowledgeUploadReservations", reservation._id, {
+      storageId: args.storageId,
+    });
+    return null;
   },
 });
 

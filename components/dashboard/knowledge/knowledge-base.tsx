@@ -66,7 +66,9 @@ type UploadTask = {
   mimeType: string;
   requestId: string;
   target: UploadTarget;
+  reservationToken?: string;
   storageId?: Id<"_storage">;
+  uploadClaimed?: boolean;
 };
 type UploadState =
   | { phase: "idle" }
@@ -394,6 +396,7 @@ export function KnowledgeBase({
 }) {
   const documents = usePreloadedAuthQuery(preloadedDocuments) ?? [];
   const generateUploadUrl = useMutation(api.knowledge.generateUploadUrl);
+  const claimUpload = useMutation(api.knowledge.claimUpload);
   const registerDocument = useMutation(api.knowledge.register);
   const replaceDocument = useMutation(api.knowledge.replace);
   const retryDocument = useMutation(api.knowledge.retry);
@@ -482,6 +485,17 @@ export function KnowledgeBase({
     }
   }
 
+  async function claimUploadTask(task: UploadTask) {
+    if (!task.storageId || !task.reservationToken) {
+      throw new Error("The upload completed without a valid reservation.");
+    }
+    await claimUpload({
+      storageId: task.storageId,
+      reservationToken: task.reservationToken,
+    });
+    task.uploadClaimed = true;
+  }
+
   async function runUploadTask(task: UploadTask) {
     uploadTaskRef.current = task;
     setActionError(null);
@@ -493,7 +507,8 @@ export function KnowledgeBase({
     });
 
     try {
-      const uploadUrl = await generateUploadUrl({});
+      const { uploadUrl, reservationToken } = await generateUploadUrl({});
+      task.reservationToken = reservationToken;
       task.storageId = await uploadToStorage(
         uploadUrl,
         task.file,
@@ -507,6 +522,7 @@ export function KnowledgeBase({
           });
         },
       );
+      await claimUploadTask(task);
       await registerTask(task);
     } catch (error) {
       setUploadState({
@@ -606,6 +622,7 @@ export function KnowledgeBase({
 
     try {
       if (task.storageId) {
+        if (!task.uploadClaimed) await claimUploadTask(task);
         await registerTask(task);
       } else {
         await runUploadTask(task);

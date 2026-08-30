@@ -52,8 +52,14 @@ const list = makeFunctionReference<
 const generateUploadUrl = makeFunctionReference<
   "mutation",
   Record<string, never>,
-  string
+  { uploadUrl: string; reservationToken: string }
 >("knowledge:generateUploadUrl");
+
+const claimUpload = makeFunctionReference<
+  "mutation",
+  { reservationToken: string; storageId: StorageId },
+  null
+>("knowledge:claimUpload");
 
 const remove = makeFunctionReference<
   "mutation",
@@ -319,8 +325,8 @@ describe("knowledge registration", () => {
       clientRequestId: "d89568a7-4e3a-4a7e-8a50-5a83a1bbaeb4",
     };
     const now = Date.now();
-    const documentId = await t.run(async (ctx) =>
-      ctx.db.insert("knowledgeDocuments", {
+    const documentId = await t.run(async (ctx) => {
+      const inserted = await ctx.db.insert("knowledgeDocuments", {
         workspaceId,
         storageId,
         clientRequestId: request.clientRequestId,
@@ -336,14 +342,26 @@ describe("knowledge registration", () => {
         attempt: 0,
         createdAt: now,
         updatedAt: now,
-      }),
-    );
+      });
+      await ctx.db.insert("knowledgeUploadReservations", {
+        workspaceId,
+        token: "idempotent-upload",
+        storageId,
+        createdAt: now,
+      });
+      return inserted;
+    });
 
     const asOwner = t.withIdentity(ownerA);
     const first = await asOwner.mutation(register, request);
     const second = await asOwner.mutation(register, request);
     expect(first.documentId).toBe(documentId);
     expect(second).toEqual(first);
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db.query("knowledgeUploadReservations").collect(),
+      ),
+    ).toEqual([]);
     await createWorkspace(t, ownerB);
     await expect(t.withIdentity(ownerB).mutation(remove, first)).rejects.toThrow(
       "Knowledge document not found",
@@ -383,13 +401,56 @@ describe("knowledge registration", () => {
     const asOwner = t.withIdentity(ownerA);
 
     for (let issued = 0; issued < 5; issued += 1) {
-      await expect(asOwner.mutation(generateUploadUrl, {})).resolves.toMatch(
-        /^https?:\/\//,
-      );
+      await expect(asOwner.mutation(generateUploadUrl, {})).resolves.toEqual({
+        uploadUrl: expect.stringMatching(/^https?:\/\//),
+        reservationToken: expect.any(String),
+      });
     }
     await expect(asOwner.mutation(generateUploadUrl, {})).rejects.toThrow(
       "daily knowledge upload byte limit",
     );
+  });
+
+  test("only the reserving workspace can claim a newly uploaded storage object", async () => {
+    const t = backend();
+    await createWorkspace(t, ownerA);
+    await createWorkspace(t, ownerB);
+    const { reservationToken } = await t
+      .withIdentity(ownerA)
+      .mutation(generateUploadUrl, {});
+    const storageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["claimed"], { type: "text/plain" })),
+    );
+
+    await expect(
+      t.withIdentity(ownerB).mutation(claimUpload, {
+        reservationToken,
+        storageId,
+      }),
+    ).rejects.toThrow("reservation is no longer available");
+    await expect(
+      t.withIdentity(ownerA).mutation(claimUpload, {
+        reservationToken,
+        storageId,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      t.withIdentity(ownerA).mutation(claimUpload, {
+        reservationToken,
+        storageId,
+      }),
+    ).resolves.toBeNull();
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db.query("knowledgeUploadReservations").collect(),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        workspaceId: expect.any(String),
+        token: reservationToken,
+        storageId,
+      }),
+    ]);
   });
 
   test("rejects a spoofed client MIME when storage metadata disagrees", async () => {
@@ -640,7 +701,7 @@ describe("knowledge registration", () => {
 });
 
 describe("knowledge recovery", () => {
-  test("deletes abandoned storage after the grace window and preserves registered files", async () => {
+  test("deletes only claimed knowledge orphans after the grace window", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
@@ -652,9 +713,12 @@ describe("knowledge recovery", () => {
       const orphanStorageId = await t.run(async (ctx) =>
         ctx.storage.store(new Blob(["abandoned"])),
       );
+      const unrelatedStorageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["unrelated"])),
+      );
       const now = Date.now();
-      await t.run(async (ctx) =>
-        ctx.db.insert("knowledgeDocuments", {
+      await t.run(async (ctx) => {
+        await ctx.db.insert("knowledgeDocuments", {
           workspaceId,
           storageId: registeredStorageId,
           clientRequestId: "1f8627d2-dbbe-4171-b893-bdb83a473b03",
@@ -670,8 +734,20 @@ describe("knowledge recovery", () => {
           attempt: 0,
           createdAt: now,
           updatedAt: now,
-        }),
-      );
+        });
+        await ctx.db.insert("knowledgeUploadReservations", {
+          workspaceId,
+          token: "registered-upload",
+          storageId: registeredStorageId,
+          createdAt: now,
+        });
+        await ctx.db.insert("knowledgeUploadReservations", {
+          workspaceId,
+          token: "abandoned-upload",
+          storageId: orphanStorageId,
+          createdAt: now,
+        });
+      });
 
       vi.advanceTimersByTime(24 * 60 * 60_000 + 1);
       await t.mutation(sweepOrphanedStorage, { cursor: null });
@@ -686,6 +762,16 @@ describe("knowledge recovery", () => {
           ctx.db.system.get("_storage", orphanStorageId),
         ),
       ).toBeNull();
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.system.get("_storage", unrelatedStorageId),
+        ),
+      ).not.toBeNull();
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.query("knowledgeUploadReservations").collect(),
+        ),
+      ).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

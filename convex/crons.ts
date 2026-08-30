@@ -7,7 +7,7 @@ crons.interval(
   "clean abandoned knowledge uploads",
   { hours: 24 },
   internal.knowledgeOrphans.sweep,
-  { cursor: null },
+  {},
 );
 
 export default crons;
