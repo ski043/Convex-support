@@ -322,6 +322,14 @@ describe("visitor sessions and isolation", () => {
     const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
     const session = await createVisitor(t, workspaceId);
 
+    await expect(
+      t.mutation(getBootstrapRenewalPolicy, {
+        workspaceId,
+        capabilityToken: session.token,
+        origin: "https://attacker.example.test",
+      }),
+    ).resolves.toBeNull();
+
     await t.run(async (ctx) => {
       const visitor = await ctx.db
         .query("visitors")
