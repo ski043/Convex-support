@@ -15,6 +15,7 @@ import {
   knowledgeError,
   knowledgeNamespace,
   MAX_AUTOMATIC_INGESTION_ATTEMPTS,
+  MAX_KNOWLEDGE_FILE_BYTES,
   MAX_TOTAL_INGESTION_ATTEMPTS,
   normalizeClientRequestId,
   sanitizeFailureMessage,
@@ -59,6 +60,7 @@ const recoverProcessingLeaseReference = makeFunctionReference<
 
 const HOUR = 60 * MINUTE;
 const PROCESSING_LEASE_MS = 30 * 60_000;
+const KNOWLEDGE_UPLOAD_BYTES_PER_DAY = 100 * 1024 * 1024;
 const knowledgeRateLimiter = new RateLimiter(components.rateLimiter, {
   knowledgeUploadUrl: {
     kind: "fixed window",
@@ -74,9 +76,9 @@ const knowledgeRateLimiter = new RateLimiter(components.rateLimiter, {
   },
   knowledgeUploadBytes: {
     kind: "fixed window",
-    rate: 100 * 1024 * 1024,
+    rate: KNOWLEDGE_UPLOAD_BYTES_PER_DAY,
     period: DAY,
-    capacity: 100 * 1024 * 1024,
+    capacity: KNOWLEDGE_UPLOAD_BYTES_PER_DAY,
   },
   knowledgeIngestionWorkspace: {
     kind: "token bucket",
@@ -166,7 +168,7 @@ function normalizeDeclaredMimeType(value: string) {
   return normalized;
 }
 
-async function consumeUploadQuota(
+async function consumeRegistrationQuota(
   ctx: MutationCtx,
   workspaceId: Id<"workspaces">,
   size: number,
@@ -183,16 +185,26 @@ async function consumeUploadQuota(
       "The daily knowledge upload limit has been reached.",
     );
   }
-  const byteLimit = await knowledgeRateLimiter.limit(
-    ctx,
-    "knowledgeUploadBytes",
-    { key, count: size },
-  );
-  if (!byteLimit.ok) {
-    throw knowledgeError(
-      "UPLOAD_QUOTA_EXCEEDED",
-      "The daily knowledge upload byte limit has been reached.",
+  const unusedReservation = MAX_KNOWLEDGE_FILE_BYTES - size;
+  if (unusedReservation > 0) {
+    const current = await knowledgeRateLimiter.getValue(
+      ctx,
+      "knowledgeUploadBytes",
+      { key },
     );
+    // The component has no refund API. A bounded negative consume restores
+    // only this upload's unused reservation and never exceeds bucket capacity,
+    // including when registration crosses a fixed-window boundary.
+    const refundable = Math.min(
+      unusedReservation,
+      Math.max(0, KNOWLEDGE_UPLOAD_BYTES_PER_DAY - current.value),
+    );
+    if (refundable > 0) {
+      await knowledgeRateLimiter.limit(ctx, "knowledgeUploadBytes", {
+        key,
+        count: -refundable,
+      });
+    }
   }
 }
 
@@ -363,7 +375,7 @@ async function registerUpload(
     );
   }
 
-  await consumeUploadQuota(ctx, workspace._id, storedFile.size);
+  await consumeRegistrationQuota(ctx, workspace._id, storedFile.size);
   const now = Date.now();
   const documentId = await ctx.db.insert("knowledgeDocuments", {
     workspaceId: workspace._id,
@@ -438,6 +450,20 @@ export const generateUploadUrl = mutation({
       throw knowledgeError(
         "UPLOAD_URL_QUOTA_EXCEEDED",
         "The daily upload URL limit has been reached.",
+      );
+    }
+    const byteReservation = await knowledgeRateLimiter.limit(
+      ctx,
+      "knowledgeUploadBytes",
+      {
+        key: String(workspace._id),
+        count: MAX_KNOWLEDGE_FILE_BYTES,
+      },
+    );
+    if (!byteReservation.ok) {
+      throw knowledgeError(
+        "UPLOAD_QUOTA_EXCEEDED",
+        "The daily knowledge upload byte limit has been reached.",
       );
     }
     return await ctx.storage.generateUploadUrl();

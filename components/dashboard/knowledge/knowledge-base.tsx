@@ -652,6 +652,7 @@ export function KnowledgeBase({
       setActionError(
         knowledgeErrorMessage(error, "This source could not be deleted. Try again shortly."),
       );
+    } finally {
       setPendingActions((current) => {
         const next = { ...current };
         delete next[documentId];

@@ -22,6 +22,7 @@ import type * as knowledgeExtract from "../knowledgeExtract.js";
 import type * as knowledgeInternal from "../knowledgeInternal.js";
 import type * as knowledgeModel from "../knowledgeModel.js";
 import type * as knowledgeNode from "../knowledgeNode.js";
+import type * as knowledgeOrphans from "../knowledgeOrphans.js";
 import type * as knowledgeRag from "../knowledgeRag.js";
 import type * as typingPresence from "../typingPresence.js";
 import type * as widgetChat from "../widgetChat.js";
@@ -51,6 +52,7 @@ declare const fullApi: ApiFromModules<{
   knowledgeInternal: typeof knowledgeInternal;
   knowledgeModel: typeof knowledgeModel;
   knowledgeNode: typeof knowledgeNode;
+  knowledgeOrphans: typeof knowledgeOrphans;
   knowledgeRag: typeof knowledgeRag;
   typingPresence: typeof typingPresence;
   widgetChat: typeof widgetChat;

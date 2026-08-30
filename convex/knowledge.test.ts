@@ -106,6 +106,12 @@ const cleanupStorage = makeFunctionReference<
   null
 >("knowledge:cleanupStorage");
 
+const sweepOrphanedStorage = makeFunctionReference<
+  "mutation",
+  { cursor: string | null },
+  null
+>("knowledgeOrphans:sweep");
+
 const completeExistingEntry = makeFunctionReference<
   "mutation",
   {
@@ -350,18 +356,18 @@ describe("knowledge registration", () => {
     expect(documents[0]).not.toHaveProperty("ragEntryId");
   });
 
-  test("enforces the upload URL quota independently of visitor message limits", async () => {
+  test("reserves worst-case bytes before issuing an upload URL", async () => {
     const t = backend();
     await createWorkspace(t, ownerA);
     const asOwner = t.withIdentity(ownerA);
 
-    for (let issued = 0; issued < 40; issued += 1) {
+    for (let issued = 0; issued < 5; issued += 1) {
       await expect(asOwner.mutation(generateUploadUrl, {})).resolves.toMatch(
         /^https?:\/\//,
       );
     }
     await expect(asOwner.mutation(generateUploadUrl, {})).rejects.toThrow(
-      "daily upload URL limit",
+      "daily knowledge upload byte limit",
     );
   });
 
@@ -569,6 +575,57 @@ describe("knowledge registration", () => {
 });
 
 describe("knowledge recovery", () => {
+  test("deletes abandoned storage after the grace window and preserves registered files", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
+      const t = backend();
+      const workspaceId = await createWorkspace(t, ownerA);
+      const registeredStorageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["registered"])),
+      );
+      const orphanStorageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["abandoned"])),
+      );
+      const now = Date.now();
+      await t.run(async (ctx) =>
+        ctx.db.insert("knowledgeDocuments", {
+          workspaceId,
+          storageId: registeredStorageId,
+          clientRequestId: "1f8627d2-dbbe-4171-b893-bdb83a473b03",
+          stableKey: "document:registered-storage",
+          version: 1,
+          filename: "registered.txt",
+          title: "Registered",
+          mimeType: "text/plain",
+          fileKind: "text",
+          size: 10,
+          sha256: "registered",
+          status: "queued",
+          attempt: 0,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+
+      vi.advanceTimersByTime(24 * 60 * 60_000 + 1);
+      await t.mutation(sweepOrphanedStorage, { cursor: null });
+
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.system.get("_storage", registeredStorageId),
+        ),
+      ).not.toBeNull();
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.system.get("_storage", orphanStorageId),
+        ),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("a token-guarded processing watchdog retries, then fails at the bound", async () => {
     vi.useFakeTimers();
     try {
