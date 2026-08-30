@@ -9,7 +9,7 @@ import {
   PauseCircleIcon,
   PlayCircleIcon,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { api } from "@/convex/_generated/api";
+import { syncUntouchedValue } from "@/lib/settings-form-model";
 import { cn } from "@/lib/utils";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
@@ -70,8 +71,35 @@ export function AiSettingsCard({
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const lastServerSettings = useRef({
+    enabled: initialSettings.enabled,
+    handoffMessage: initialSettings.handoffMessage,
+  });
   const enabledButUnavailable =
     initialSettings.enabled && !initialSettings.globalAvailable;
+
+  useEffect(() => {
+    const previousSettings = lastServerSettings.current;
+
+    setEnabled((current) =>
+      syncUntouchedValue(
+        current,
+        previousSettings.enabled,
+        initialSettings.enabled,
+      ),
+    );
+    setHandoffMessage((current) =>
+      syncUntouchedValue(
+        current,
+        previousSettings.handoffMessage,
+        initialSettings.handoffMessage,
+      ),
+    );
+    lastServerSettings.current = {
+      enabled: initialSettings.enabled,
+      handoffMessage: initialSettings.handoffMessage,
+    };
+  }, [initialSettings.enabled, initialSettings.handoffMessage]);
 
   function updateEnabled(nextEnabled: boolean) {
     setEnabled(nextEnabled);

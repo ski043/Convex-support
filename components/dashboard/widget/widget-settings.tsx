@@ -55,6 +55,12 @@ import {
   widgetInstallSnippet,
   widgetInstallSnippetParts,
 } from "@/lib/widget-snippet";
+import {
+  normalizeNonEmptyValues,
+  normalizedValuesEqual,
+  syncUntouchedValue,
+  widgetOriginObservationWarnings,
+} from "@/lib/settings-form-model";
 import { cn } from "@/lib/utils";
 
 type WidgetTheme = "blue" | "green" | "red" | "amber" | "zinc";
@@ -180,6 +186,10 @@ function OriginSecuritySettings({
   );
   const recentOriginState = useQuery(api.widgetSettings.getRecentOrigins);
   const recentOrigins = recentOriginState?.origins ?? [];
+  const observationWarnings = widgetOriginObservationWarnings({
+    isAtCapacity: recentOriginState?.isAtCapacity ?? false,
+    isTruncated: recentOriginState?.isTruncated ?? false,
+  });
   const [origins, setOrigins] = useState<OriginDraft[]>(() =>
     (initialOrigins.length > 0 ? initialOrigins : [""]).map((value, index) => ({
       id: `origin-${index}`,
@@ -194,6 +204,53 @@ function OriginSecuritySettings({
   >("idle");
   const [restartError, setRestartError] = useState<string | null>(null);
   const nextOriginId = useRef(origins.length);
+  const serverOriginsKey = JSON.stringify(initialOrigins);
+  const lastServerSecurity = useRef({
+    originsKey: serverOriginsKey,
+    policy: initialPolicy,
+  });
+
+  function draftsForValues(current: OriginDraft[], values: string[]) {
+    const displayValues = values.length > 0 ? values : [""];
+    return displayValues.map((value) => {
+      const existing = current.find(
+        (origin) => origin.value.trim() === value,
+      );
+      if (existing) return { ...existing, value };
+
+      const id = `origin-${nextOriginId.current}`;
+      nextOriginId.current += 1;
+      return { id, value };
+    });
+  }
+
+  useEffect(() => {
+    const previousSecurity = lastServerSecurity.current;
+    if (
+      previousSecurity.originsKey === serverOriginsKey &&
+      previousSecurity.policy === initialPolicy
+    ) {
+      return;
+    }
+
+    const previousOrigins = JSON.parse(previousSecurity.originsKey) as string[];
+    const nextOrigins = JSON.parse(serverOriginsKey) as string[];
+    setOrigins((current) =>
+      normalizedValuesEqual(
+        current.map((origin) => origin.value),
+        previousOrigins,
+      )
+        ? draftsForValues(current, nextOrigins)
+        : current,
+    );
+    setPolicy((current) =>
+      syncUntouchedValue(current, previousSecurity.policy, initialPolicy),
+    );
+    lastServerSecurity.current = {
+      originsKey: serverOriginsKey,
+      policy: initialPolicy,
+    };
+  }, [initialPolicy, serverOriginsKey]);
 
   function updateOrigin(id: string, value: string) {
     setOrigins((current) =>
@@ -252,7 +309,13 @@ function OriginSecuritySettings({
     setSaveError(null);
 
     try {
-      await saveSecurity({ allowedOrigins: origins.map((origin) => origin.value) });
+      const allowedOrigins = normalizeNonEmptyValues(
+        origins.map((origin) => origin.value),
+      );
+      await saveSecurity({
+        allowedOrigins,
+      });
+      setOrigins((current) => draftsForValues(current, allowedOrigins));
       setPolicy("enforced");
       setSaveStatus("saved");
     } catch (error) {
@@ -393,13 +456,14 @@ function OriginSecuritySettings({
                   origin and activity with your actual site configuration before adding
                   it.
                 </FieldDescription>
-                {recentOriginState?.isAtCapacity ? (
+                {observationWarnings.showCapacity ? (
                   <FieldDescription className="text-destructive">
                     The rolling 100-origin safety window is full. A new origin
                     replaces the least-recently-seen value, so verify your
                     configuration before enforcing this unverified history.
                   </FieldDescription>
-                ) : recentOriginState?.isTruncated ? (
+                ) : null}
+                {observationWarnings.showTruncation ? (
                   <FieldDescription className="text-destructive">
                     More than 20 origins have reported activity. This list shows only
                     the 20 most recent and is incomplete.
@@ -957,7 +1021,6 @@ export function WidgetSettings({
           </Card>
 
           <OriginSecuritySettings
-            key={`${security.originPolicy}:${security.allowedOrigins.join("|")}`}
             initialOrigins={security.allowedOrigins}
             initialPolicy={security.originPolicy}
           />
