@@ -293,15 +293,19 @@ export const restartSecuritySetup = mutation({
       });
     }
 
-    const hasMore: boolean = await clearWidgetOriginObservations(
+    const clearResult = await clearWidgetOriginObservations(
       ctx,
       workspaceId,
     );
-    if (hasMore) {
+    if (clearResult.hasMore && clearResult.clearThrough) {
       await ctx.scheduler.runAfter(
         0,
         internal.widgetSettings.continueClearWidgetOriginObservations,
-        { workspaceId },
+        {
+          workspaceId,
+          clearThroughLastSeenAt: clearResult.clearThrough.lastSeenAt,
+          clearThroughCreationTime: clearResult.clearThrough.creationTime,
+        },
       );
     }
     return null;
@@ -309,14 +313,22 @@ export const restartSecuritySetup = mutation({
 });
 
 export const continueClearWidgetOriginObservations = internalMutation({
-  args: { workspaceId: v.id("workspaces") },
+  args: {
+    workspaceId: v.id("workspaces"),
+    clearThroughLastSeenAt: v.number(),
+    clearThroughCreationTime: v.number(),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const hasMore: boolean = await clearWidgetOriginObservations(
+    const clearResult = await clearWidgetOriginObservations(
       ctx,
       args.workspaceId,
+      {
+        lastSeenAt: args.clearThroughLastSeenAt,
+        creationTime: args.clearThroughCreationTime,
+      },
     );
-    if (hasMore) {
+    if (clearResult.hasMore) {
       await ctx.scheduler.runAfter(
         0,
         internal.widgetSettings.continueClearWidgetOriginObservations,

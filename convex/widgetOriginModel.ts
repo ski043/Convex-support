@@ -5,6 +5,11 @@ export const MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE = 100;
 const MAX_WIDGET_ORIGIN_OVERFLOW_ROWS_READ = 100;
 const WIDGET_ORIGIN_CLEAR_BATCH_SIZE = 100;
 
+export type WidgetOriginClearBoundary = {
+  lastSeenAt: number;
+  creationTime: number;
+};
+
 async function repairWidgetOriginObservationOverflow(
   ctx: MutationCtx,
   workspaceId: Id<"workspaces">,
@@ -74,18 +79,52 @@ export async function recordWidgetOriginObservation(
 export async function clearWidgetOriginObservations(
   ctx: MutationCtx,
   workspaceId: Id<"workspaces">,
-) {
+  clearThrough?: WidgetOriginClearBoundary,
+): Promise<{
+  hasMore: boolean;
+  clearThrough: WidgetOriginClearBoundary | null;
+}> {
+  const newest = clearThrough
+    ? null
+    : await ctx.db
+        .query("widgetOriginObservations")
+        .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+          q.eq("workspaceId", workspaceId),
+        )
+        .order("desc")
+        .first();
+  const boundary =
+    clearThrough ??
+    (newest
+      ? {
+          lastSeenAt: newest.lastSeenAt,
+          creationTime: newest._creationTime,
+        }
+      : null);
+  if (!boundary) return { hasMore: false, clearThrough: null };
+
   const observations = await ctx.db
     .query("widgetOriginObservations")
     .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
-      q.eq("workspaceId", workspaceId),
+      q
+        .eq("workspaceId", workspaceId)
+        .lte("lastSeenAt", boundary.lastSeenAt),
     )
+    .order("asc")
     .take(WIDGET_ORIGIN_CLEAR_BATCH_SIZE + 1);
-  const batch = observations.slice(0, WIDGET_ORIGIN_CLEAR_BATCH_SIZE);
+  const eligible = observations.filter(
+    (observation) =>
+      observation.lastSeenAt < boundary.lastSeenAt ||
+      observation._creationTime <= boundary.creationTime,
+  );
+  const batch = eligible.slice(0, WIDGET_ORIGIN_CLEAR_BATCH_SIZE);
   await Promise.all(
     batch.map((observation) =>
       ctx.db.delete("widgetOriginObservations", observation._id),
     ),
   );
-  return observations.length > WIDGET_ORIGIN_CLEAR_BATCH_SIZE;
+  return {
+    hasMore: eligible.length > WIDGET_ORIGIN_CLEAR_BATCH_SIZE,
+    clearThrough: boundary,
+  };
 }

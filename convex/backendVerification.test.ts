@@ -14,6 +14,7 @@ import schema from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
 import { getRecentWidgetOriginObservations } from "./widgetSettings";
 import {
+  clearWidgetOriginObservations,
   MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE,
   recordWidgetOriginObservation,
 } from "./widgetOriginModel";
@@ -180,7 +181,11 @@ const getWidgetAutomationState = makeFunctionReference<
 
 const continueClearWidgetOriginObservations = makeFunctionReference<
   "mutation",
-  { workspaceId: WorkspaceId },
+  {
+    workspaceId: WorkspaceId;
+    clearThroughLastSeenAt: number;
+    clearThroughCreationTime: number;
+  },
   null
 >("widgetSettings:continueClearWidgetOriginObservations");
 
@@ -1113,7 +1118,11 @@ describe("widget origin enforcement guidance", () => {
     vi.useFakeTimers();
     try {
       await t.run(async (ctx) => {
-        for (let index = 0; index < 25; index += 1) {
+        for (
+          let index = 0;
+          index < MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25;
+          index += 1
+        ) {
           await ctx.db.insert("widgetOriginObservations", {
             workspaceId,
             origin: `https://legacy-overflow-${index}.example.com`,
@@ -1123,7 +1132,29 @@ describe("widget origin enforcement guidance", () => {
           });
         }
       });
-      await t.mutation(continueClearWidgetOriginObservations, { workspaceId });
+      const firstBatch = await t.run(async (ctx) =>
+        clearWidgetOriginObservations(ctx, workspaceId),
+      );
+      if (!firstBatch.hasMore || !firstBatch.clearThrough) {
+        throw new Error("Expected a scheduled clear continuation");
+      }
+      const clearThrough = firstBatch.clearThrough;
+      const rediscoveredOrigin = "https://rediscovered.example.com";
+      vi.advanceTimersByTime(1);
+      await t.run(async (ctx) => {
+        await ctx.db.insert("widgetOriginObservations", {
+          workspaceId,
+          origin: rediscoveredOrigin,
+          sessionCount: 1,
+          firstSeenAt: clearThrough.lastSeenAt,
+          lastSeenAt: clearThrough.lastSeenAt,
+        });
+      });
+      await t.mutation(continueClearWidgetOriginObservations, {
+        workspaceId,
+        clearThroughLastSeenAt: clearThrough.lastSeenAt,
+        clearThroughCreationTime: clearThrough.creationTime,
+      });
       await t.finishAllScheduledFunctions(() => vi.runAllTimers());
     } finally {
       vi.useRealTimers();
@@ -1135,8 +1166,8 @@ describe("widget origin enforcement guidance", () => {
           .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
             q.eq("workspaceId", workspaceId),
           )
-          .take(1),
+          .take(2),
       ),
-    ).toEqual([]);
+    ).toMatchObject([{ origin: "https://rediscovered.example.com" }]);
   });
 });
