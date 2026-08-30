@@ -14,7 +14,6 @@ import schema from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
 import { getRecentWidgetOriginObservations } from "./widgetSettings";
 import {
-  clearWidgetOriginObservations,
   MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE,
   recordWidgetOriginObservation,
 } from "./widgetOriginModel";
@@ -178,6 +177,12 @@ const getWidgetAutomationState = makeFunctionReference<
   { workspaceId: WorkspaceId; token: string },
   { isAiTyping: boolean; handling: "ai" | "human"; needsHuman: boolean }
 >("widgetChat:getAutomationState");
+
+const continueClearWidgetOriginObservations = makeFunctionReference<
+  "mutation",
+  { workspaceId: WorkspaceId },
+  null
+>("widgetSettings:continueClearWidgetOriginObservations");
 
 const removeKnowledge = makeFunctionReference<
   "mutation",
@@ -1105,18 +1110,24 @@ describe("widget origin enforcement guidance", () => {
       `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25}.example.com`,
     );
 
-    await t.run(async (ctx) => {
-      for (let index = 0; index < 25; index += 1) {
-        await ctx.db.insert("widgetOriginObservations", {
-          workspaceId,
-          origin: `https://legacy-overflow-${index}.example.com`,
-          sessionCount: 1,
-          firstSeenAt: index,
-          lastSeenAt: index,
-        });
-      }
-      await clearWidgetOriginObservations(ctx, workspaceId);
-    });
+    vi.useFakeTimers();
+    try {
+      await t.run(async (ctx) => {
+        for (let index = 0; index < 25; index += 1) {
+          await ctx.db.insert("widgetOriginObservations", {
+            workspaceId,
+            origin: `https://legacy-overflow-${index}.example.com`,
+            sessionCount: 1,
+            firstSeenAt: index,
+            lastSeenAt: index,
+          });
+        }
+      });
+      await t.mutation(continueClearWidgetOriginObservations, { workspaceId });
+      await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+    } finally {
+      vi.useRealTimers();
+    }
     expect(
       await t.run(async (ctx) =>
         ctx.db

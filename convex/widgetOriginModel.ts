@@ -1,10 +1,9 @@
-import { ConvexError } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 
 export const MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE = 100;
-const MAX_WIDGET_ORIGIN_OVERFLOW_REPAIRS_PER_WRITE = 100;
-const MAX_WIDGET_ORIGIN_CLEAR_ROWS_PER_MUTATION = 1_000;
+const MAX_WIDGET_ORIGIN_OVERFLOW_ROWS_READ = 100;
+const WIDGET_ORIGIN_CLEAR_BATCH_SIZE = 100;
 
 async function repairWidgetOriginObservationOverflow(
   ctx: MutationCtx,
@@ -19,7 +18,7 @@ async function repairWidgetOriginObservationOverflow(
     .order("asc")
     .take(
       MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE +
-        MAX_WIDGET_ORIGIN_OVERFLOW_REPAIRS_PER_WRITE,
+        MAX_WIDGET_ORIGIN_OVERFLOW_ROWS_READ,
     );
   const retainedBeforeWrite =
     MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE - slotsNeeded;
@@ -81,15 +80,12 @@ export async function clearWidgetOriginObservations(
     .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
       q.eq("workspaceId", workspaceId),
     )
-    .take(MAX_WIDGET_ORIGIN_CLEAR_ROWS_PER_MUTATION + 1);
-  if (observations.length > MAX_WIDGET_ORIGIN_CLEAR_ROWS_PER_MUTATION) {
-    throw new ConvexError(
-      "Origin discovery history is too large to clear safely in one request. Run the widget normally to repair the history, then try again.",
-    );
-  }
+    .take(WIDGET_ORIGIN_CLEAR_BATCH_SIZE + 1);
+  const batch = observations.slice(0, WIDGET_ORIGIN_CLEAR_BATCH_SIZE);
   await Promise.all(
-    observations.map((observation) =>
+    batch.map((observation) =>
       ctx.db.delete("widgetOriginObservations", observation._id),
     ),
   );
+  return observations.length > WIDGET_ORIGIN_CLEAR_BATCH_SIZE;
 }

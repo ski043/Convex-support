@@ -1,6 +1,13 @@
 import { ConvexError, v } from "convex/values";
+import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import {
+  internalMutation,
+  mutation,
+  query,
+  type MutationCtx,
+  type QueryCtx,
+} from "./_generated/server";
 import { authComponent } from "./auth";
 import { widgetSettingsValidator } from "./schema";
 import {
@@ -286,7 +293,36 @@ export const restartSecuritySetup = mutation({
       });
     }
 
-    await clearWidgetOriginObservations(ctx, workspaceId);
+    const hasMore: boolean = await clearWidgetOriginObservations(
+      ctx,
+      workspaceId,
+    );
+    if (hasMore) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.widgetSettings.continueClearWidgetOriginObservations,
+        { workspaceId },
+      );
+    }
+    return null;
+  },
+});
+
+export const continueClearWidgetOriginObservations = internalMutation({
+  args: { workspaceId: v.id("workspaces") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const hasMore: boolean = await clearWidgetOriginObservations(
+      ctx,
+      args.workspaceId,
+    );
+    if (hasMore) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.widgetSettings.continueClearWidgetOriginObservations,
+        args,
+      );
+    }
     return null;
   },
 });
