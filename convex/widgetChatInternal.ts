@@ -10,6 +10,16 @@ const expireCapabilityReference = makeFunctionReference<
   null
 >("widgetChatInternal:expireCapability");
 
+const deleteBootstrapUseReference = makeFunctionReference<
+  "mutation",
+  {
+    bootstrapUseId: Id<"widgetBootstrapUses">;
+    nonce: string;
+    expectedExpiresAt: number;
+  },
+  null
+>("widgetChatInternal:deleteBootstrapUse");
+
 export const expireCapability = internalMutation({
   args: {
     visitorId: v.id("visitors"),
@@ -43,6 +53,31 @@ export const expireCapability = internalMutation({
     }
 
     await ctx.db.patch("visitors", visitor._id, { capabilityExpired: true });
+    return null;
+  },
+});
+
+export const deleteBootstrapUse = internalMutation({
+  args: {
+    bootstrapUseId: v.id("widgetBootstrapUses"),
+    nonce: v.string(),
+    expectedExpiresAt: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const use = await ctx.db.get("widgetBootstrapUses", args.bootstrapUseId);
+    if (
+      !use ||
+      use.nonce !== args.nonce ||
+      use.expiresAt !== args.expectedExpiresAt
+    ) {
+      return null;
+    }
+    if (use.expiresAt > Date.now()) {
+      await ctx.scheduler.runAt(use.expiresAt, deleteBootstrapUseReference, args);
+      return null;
+    }
+    await ctx.db.delete("widgetBootstrapUses", use._id);
     return null;
   },
 });

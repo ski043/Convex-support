@@ -9,6 +9,7 @@ export const WIDGET_CONTEXT_MESSAGE_TYPE = "context";
 export const WIDGET_READY_MESSAGE_TYPE = "ready";
 export const WIDGET_TOKEN_MESSAGE_TYPE = "token";
 export const WIDGET_FRAME_MESSAGE_TYPE = "frame";
+export const WIDGET_HUMAN_REQUEST_MESSAGE = "I'd like to talk to a human.";
 
 export const WIDGET_COOKIE_PREFIX = "marshaldesk_vid_";
 export const WIDGET_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -48,6 +49,7 @@ export type WidgetBootstrapMessage = {
   marker: typeof WIDGET_MESSAGE_MARKER;
   type: typeof WIDGET_BOOTSTRAP_MESSAGE_TYPE;
   token: string | null;
+  bootstrapToken: string;
   context: WidgetPageContext;
 };
 

@@ -1,16 +1,30 @@
 /// <reference types="vite/client" />
 
+import agentTest from "@convex-dev/agent/test";
 import { makeFunctionReference } from "convex/server";
 import type { GenericId } from "convex/values";
 import { convexTest } from "convex-test";
+import rateLimiterTest from "@convex-dev/rate-limiter/test";
 import { describe, expect, test, vi } from "vitest";
 import { CAPABILITY_TTL_MS } from "./chatModel";
+import {
+  runResponderOrchestration,
+  type ResponderDependencies,
+  type RunPreflight,
+  type SyncResult,
+} from "./aiResponderOrchestration";
 import schema from "./schema";
+import {
+  signWidgetBootstrap,
+  WIDGET_BOOTSTRAP_VERSION,
+} from "../lib/widget-bootstrap-token";
+import { WIDGET_HUMAN_REQUEST_MESSAGE } from "../lib/widget-embed-contract";
 
 const modules = import.meta.glob("./**/*.ts");
 
 type WorkspaceId = GenericId<"workspaces">;
 type ConversationId = GenericId<"conversations">;
+type RunId = GenericId<"aiRuns">;
 
 type ContextInput = {
   city?: string | null;
@@ -38,7 +52,12 @@ type Page<T> = {
 
 const ensureSession = makeFunctionReference<
   "mutation",
-  { workspaceId: WorkspaceId; token?: string; context: ContextInput },
+  {
+    workspaceId: WorkspaceId;
+    bootstrapToken: string;
+    token?: string;
+    context: ContextInput;
+  },
   { token: string }
 >("widgetChat:ensureSession");
 
@@ -123,6 +142,30 @@ const markRead = makeFunctionReference<
   null
 >("inbox:markRead");
 
+const enforceRunKillSwitch = makeFunctionReference<
+  "mutation",
+  { runId: RunId },
+  boolean
+>("aiAutomation:enforceRunKillSwitch");
+
+const getRunPreflight = makeFunctionReference<
+  "mutation",
+  { runId: RunId },
+  RunPreflight | null
+>("aiAutomation:getRunPreflight");
+
+const syncNextBatch = makeFunctionReference<
+  "mutation",
+  { runId: RunId },
+  SyncResult
+>("aiAutomation:syncNextBatch");
+
+const handoffRun = makeFunctionReference<
+  "mutation",
+  { runId: RunId; reason: string; errorCode?: string; errorMessage?: string },
+  { status: "handed_off"; messageId: GenericId<"messages"> } | { status: "stale" }
+>("aiAutomation:handoffRun");
+
 const page = { numItems: 50, cursor: null };
 const emptyContext: ContextInput = {};
 const ownerAIdentity = {
@@ -135,9 +178,25 @@ const ownerBIdentity = {
   issuer: "https://auth.example.test",
   tokenIdentifier: "https://auth.example.test|owner-b",
 };
+const TEST_WIDGET_BOOTSTRAP_SECRET = "test-widget-bootstrap-secret-with-at-least-32-bytes";
+const TEST_WIDGET_ORIGIN = "https://shop.example.test";
+vi.stubEnv("WIDGET_BOOTSTRAP_SECRET", TEST_WIDGET_BOOTSTRAP_SECRET);
+
+const deleteBootstrapUse = makeFunctionReference<
+  "mutation",
+  {
+    bootstrapUseId: GenericId<"widgetBootstrapUses">;
+    nonce: string;
+    expectedExpiresAt: number;
+  },
+  null
+>("widgetChatInternal:deleteBootstrapUse");
 
 function makeTestBackend() {
-  return convexTest(schema, modules);
+  const t = convexTest(schema, modules);
+  agentTest.register(t);
+  rateLimiterTest.register(t);
+  return t;
 }
 
 type TestBackend = ReturnType<typeof makeTestBackend>;
@@ -159,8 +218,29 @@ async function createWorkspace(
 async function createVisitor(t: TestBackend, workspaceId: WorkspaceId) {
   return await t.mutation(ensureSession, {
     workspaceId,
+    bootstrapToken: await createBootstrap(workspaceId),
     context: emptyContext,
   });
+}
+
+async function createBootstrap(
+  workspaceId: WorkspaceId,
+  origin = TEST_WIDGET_ORIGIN,
+  policyVersion = 0,
+) {
+  const issuedAt = Date.now();
+  return await signWidgetBootstrap(
+    {
+      version: WIDGET_BOOTSTRAP_VERSION,
+      workspaceId,
+      origin,
+      policyVersion,
+      issuedAt,
+      expiresAt: issuedAt + 5 * 60_000,
+      nonce: crypto.randomUUID().replaceAll("-", ""),
+    },
+    TEST_WIDGET_BOOTSTRAP_SECRET,
+  );
 }
 
 async function firstConversation(t: TestBackend, workspaceId: WorkspaceId) {
@@ -179,6 +259,95 @@ async function firstConversation(t: TestBackend, workspaceId: WorkspaceId) {
 }
 
 describe("visitor sessions and isolation", () => {
+  test("new sessions require a short-lived origin bootstrap and reject replay", async () => {
+    const t = makeTestBackend();
+    const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
+
+    await expect(
+      t.mutation(ensureSession, {
+        workspaceId,
+        bootstrapToken: "not-a-bootstrap",
+        context: emptyContext,
+      }),
+    ).rejects.toThrow(/unavailable/i);
+
+    const bootstrapToken = await createBootstrap(workspaceId);
+    await t.mutation(ensureSession, {
+      workspaceId,
+      bootstrapToken,
+      context: emptyContext,
+    });
+    await expect(
+      t.mutation(ensureSession, {
+        workspaceId,
+        bootstrapToken,
+        context: emptyContext,
+      }),
+    ).rejects.toThrow(/unavailable/i);
+
+    const policyVersion = Date.now();
+    await t.run(async (ctx) => {
+      await ctx.db.insert("widgetSettings", {
+        ownerTokenIdentifier: ownerAIdentity.tokenIdentifier,
+        workspaceId,
+        displayName: "Support",
+        greeting: "Hello",
+        theme: "blue",
+        position: "bottomRight",
+        allowedOrigins: ["https://allowed.example.test"],
+        originPolicy: "enforced",
+        updatedAt: policyVersion,
+      });
+    });
+    await expect(
+      t.mutation(ensureSession, {
+        workspaceId,
+        bootstrapToken: await createBootstrap(
+          workspaceId,
+          "https://unknown.example.test",
+          policyVersion,
+        ),
+        context: emptyContext,
+      }),
+    ).rejects.toThrow(/unavailable/i);
+  });
+
+  test("the replay ledger is token-guarded and removed after bootstrap expiry", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = makeTestBackend();
+      const workspaceId = await createWorkspace(
+        t,
+        ownerAIdentity.tokenIdentifier,
+      );
+      await createVisitor(t, workspaceId);
+      const use = await t.run(async (ctx) =>
+        ctx.db.query("widgetBootstrapUses").withIndex("by_nonce").unique(),
+      );
+      if (!use) throw new Error("Expected bootstrap replay ledger entry");
+
+      await t.mutation(deleteBootstrapUse, {
+        bootstrapUseId: use._id,
+        nonce: `${use.nonce}-stale`,
+        expectedExpiresAt: use.expiresAt,
+      });
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.get("widgetBootstrapUses", use._id),
+        ),
+      ).not.toBeNull();
+
+      await t.finishAllScheduledFunctions(() => vi.runAllTimers(), 10);
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.get("widgetBootstrapUses", use._id),
+        ),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("a fresh session has no conversation until its first message and resumes once", async () => {
     const t = makeTestBackend();
     const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
@@ -212,6 +381,7 @@ describe("visitor sessions and isolation", () => {
     });
     await t.mutation(ensureSession, {
       workspaceId,
+      bootstrapToken: await createBootstrap(workspaceId),
       token: session.token,
       context: emptyContext,
     });
@@ -225,6 +395,103 @@ describe("visitor sessions and isolation", () => {
         .take(2),
     );
     expect(rows).toHaveLength(1);
+  });
+
+  test("the widget human action uses the canonical message path and hands off exactly once", async () => {
+    const t = makeTestBackend();
+    const workspaceId = await createWorkspace(
+      t,
+      ownerAIdentity.tokenIdentifier,
+    );
+    await t.run(async (ctx) => {
+      await ctx.db.insert("workspaceAiSettings", {
+        workspaceId,
+        enabled: true,
+        answerModel: "openai/gpt-5.6-terra",
+        handoffMessage: "A human will continue here.",
+        updatedAt: Date.now(),
+      });
+    });
+    const session = await createVisitor(t, workspaceId);
+    const requestBody = WIDGET_HUMAN_REQUEST_MESSAGE;
+    const clientMessageId = "10000000-0000-4000-8000-000000000099";
+    const first = await t.mutation(sendMessage, {
+      workspaceId,
+      token: session.token,
+      clientMessageId,
+      body: requestBody,
+      context: emptyContext,
+    });
+    const retry = await t.mutation(sendMessage, {
+      workspaceId,
+      token: session.token,
+      clientMessageId,
+      body: requestBody,
+      context: emptyContext,
+    });
+    expect(retry._id).toBe(first._id);
+
+    const conversation = await firstConversation(t, workspaceId);
+    const run = await t.run(async (ctx) =>
+      ctx.db
+        .query("aiRuns")
+        .withIndex("by_triggerMessageId", (q) =>
+          q.eq("triggerMessageId", first._id),
+        )
+        .unique(),
+    );
+    if (!run) throw new Error("Expected the human request responder run");
+
+    const searchReadyKnowledge = vi.fn(async () => ({ results: [] }));
+    const generateCandidate = vi.fn(async () => {
+      throw new Error("The model must not run for a human request");
+    });
+    const dependencies = {
+      enforceRunKillSwitch: async (runId) =>
+        await t.mutation(enforceRunKillSwitch, { runId }),
+      getRunPreflight: async (runId) =>
+        await t.mutation(getRunPreflight, { runId }),
+      syncNextBatch: async (runId) =>
+        await t.mutation(syncNextBatch, { runId }),
+      searchReadyKnowledge,
+      claimAttempt: async () => ({ status: "stale" as const }),
+      prepareRetry: async () => false,
+      generateCandidate,
+      commitCandidate: async () => ({ status: "stale" as const }),
+      handoff: async (request) => {
+        await t.mutation(handoffRun, request);
+      },
+      delay: async () => undefined,
+    } satisfies ResponderDependencies;
+
+    await runResponderOrchestration(run._id, dependencies);
+    await runResponderOrchestration(run._id, dependencies);
+
+    expect(searchReadyKnowledge).not.toHaveBeenCalled();
+    expect(generateCandidate).not.toHaveBeenCalled();
+    const messages = await t.query(listVisitorMessages, {
+      workspaceId,
+      token: session.token,
+      paginationOpts: page,
+    });
+    expect(messages.page).toHaveLength(2);
+    expect(messages.page).toMatchObject([
+      {
+        author: "assistant",
+        body: "A human will continue here.",
+      },
+      { _id: first._id, author: "visitor", body: requestBody },
+    ]);
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("aiConversationStates")
+          .withIndex("by_conversationId", (q) =>
+            q.eq("conversationId", conversation._id),
+          )
+          .unique(),
+      ),
+    ).toMatchObject({ mode: "human", attention: "needs_human" });
   });
 
   test("workspace ID and another visitor token cannot cross capability scopes", async () => {
@@ -439,6 +706,7 @@ describe("context, idempotency, and capability expiry", () => {
     const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
     const session = await t.mutation(ensureSession, {
       workspaceId,
+      bootstrapToken: await createBootstrap(workspaceId),
       context: {
         city: " Berlin ",
         country: "de",
@@ -553,6 +821,7 @@ describe("context, idempotency, and capability expiry", () => {
 
     await t.mutation(ensureSession, {
       workspaceId,
+      bootstrapToken: await createBootstrap(workspaceId),
       token: session.token,
       context: emptyContext,
     });

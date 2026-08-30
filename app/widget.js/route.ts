@@ -108,6 +108,7 @@ const loaderSource = String.raw`(function () {
   var parentOrigin = location.origin;
   var cookieName = COOKIE_PREFIX + cookieSuffix(workspaceId);
   var token = readCookie(cookieName);
+  var bootstrapToken = null;
   var iframe = document.createElement("iframe");
   var lastFrame = { position: "bottomRight", width: 88, height: 88 };
   var lastContext = "";
@@ -156,6 +157,7 @@ const loaderSource = String.raw`(function () {
       marker: MESSAGE_MARKER,
       type: BOOTSTRAP_TYPE,
       token: typeof token === "string" && token ? token : null,
+      bootstrapToken: bootstrapToken,
       context: pageContext()
     });
   }
@@ -282,11 +284,41 @@ const loaderSource = String.raw`(function () {
     (document.body || document.documentElement).appendChild(iframe);
   }
 
-  if (document.body) {
-    mount();
-  } else {
-    document.addEventListener("DOMContentLoaded", mount, { once: true });
+  function mountWhenReady() {
+    if (document.body) {
+      mount();
+    } else {
+      document.addEventListener("DOMContentLoaded", mount, { once: true });
+    }
   }
+
+  fetch(widgetOrigin + "/api/widget-bootstrap", {
+    method: "POST",
+    mode: "cors",
+    credentials: "omit",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId: workspaceId })
+  })
+    .then(function (response) {
+      if (!response.ok) throw new Error("bootstrap rejected");
+      return response.json();
+    })
+    .then(function (result) {
+      if (
+        !result ||
+        typeof result.bootstrapToken !== "string" ||
+        !result.bootstrapToken ||
+        result.bootstrapToken.length > 4096
+      ) {
+        throw new Error("invalid bootstrap");
+      }
+      bootstrapToken = result.bootstrapToken;
+      mountWhenReady();
+    })
+    .catch(function () {
+      window[BOOT_FLAG] = false;
+    });
 })();`;
 
 export async function GET() {
