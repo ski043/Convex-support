@@ -1,7 +1,7 @@
 "use client";
 
 import { usePreloadedAuthQuery } from "@convex-dev/better-auth/nextjs/client";
-import { useMutation, type Preloaded } from "convex/react";
+import { useMutation, useQuery, type Preloaded } from "convex/react";
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -155,13 +155,13 @@ function ownerSafeError(error: unknown, fallback: string) {
 function OriginSecuritySettings({
   initialOrigins,
   initialPolicy,
-  recentOrigins,
 }: {
   initialOrigins: string[];
   initialPolicy: OriginPolicy;
-  recentOrigins: string[];
 }) {
   const saveSecurity = useMutation(api.widgetSettings.saveSecurity);
+  const recentOriginState = useQuery(api.widgetSettings.getRecentOrigins);
+  const recentOrigins = recentOriginState?.origins ?? [];
   const [origins, setOrigins] = useState<OriginDraft[]>(() =>
     (initialOrigins.length > 0 ? initialOrigins : [""]).map((value, index) => ({
       id: `origin-${index}`,
@@ -306,35 +306,57 @@ function OriginSecuritySettings({
 
             {recentOrigins.length > 0 ? (
               <FieldSet>
-                <FieldLegend variant="label">Recently seen widget origins</FieldLegend>
-                <div className="flex flex-wrap gap-2">
-                  {recentOrigins.map((origin) => (
+                <FieldLegend variant="label">
+                  Unverified browser-reported origins
+                </FieldLegend>
+                <div className="flex flex-col gap-2">
+                  {recentOrigins.map((observation) => (
                     <Button
-                      key={origin}
+                      key={observation.origin}
                       type="button"
                       variant="outline"
                       size="sm"
-                      className="h-auto max-w-full font-mono text-xs"
+                      className="h-auto max-w-full justify-start py-2 text-left"
                       disabled={origins.some(
-                        (candidate) => candidate.value.trim() === origin,
+                        (candidate) =>
+                          candidate.value.trim() === observation.origin,
                       )}
-                      onClick={() => addRecentOrigin(origin)}
+                      aria-label={`Add unverified origin ${observation.origin}`}
+                      onClick={() => addRecentOrigin(observation.origin)}
                     >
                       <PlusIcon aria-hidden />
-                      <span className="truncate">{origin}</span>
+                      <span className="min-w-0">
+                        <span className="block truncate font-mono text-xs">
+                          {observation.origin}
+                        </span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {observation.sessionCount} session bootstrap
+                          {observation.sessionCount === 1 ? "" : "s"} · first{" "}
+                          {new Date(observation.firstSeenAt).toISOString()} · last{" "}
+                          {new Date(observation.lastSeenAt).toISOString()}
+                        </span>
+                      </span>
                     </Button>
                   ))}
                 </div>
                 <FieldDescription>
-                  These origins recently created or refreshed a widget session. Add
-                  every customer-facing site that should keep accepting new sessions.
+                  These values are self-reported by browsers and are not verified
+                  installs. In legacy mode, a probe can add a value here. Compare the
+                  origin and activity with your actual site configuration before adding
+                  it.
                 </FieldDescription>
+                {recentOriginState?.isTruncated ? (
+                  <FieldDescription className="text-destructive">
+                    More than 20 origins have reported activity. This list shows only
+                    the 20 most recent and is incomplete.
+                  </FieldDescription>
+                ) : null}
               </FieldSet>
             ) : policy === "legacy_limited" ? (
               <FieldDescription>
-                No widget origins have been observed yet. Open the widget once on each
-                installed customer site, then reload this page to review them before
-                enforcing the list.
+                No browser-reported origins have been recorded yet. Open the widget
+                once on each installed customer site; new observations appear here
+                automatically. You can also enter and verify each origin manually.
               </FieldDescription>
             ) : null}
           </FieldGroup>
@@ -370,7 +392,7 @@ function OriginSecuritySettings({
                       ? "Origins were not saved."
                       : policy === "legacy_limited"
                         ? "Saving immediately enables enforcement for this exact list."
-                        : "Changes apply after you save."}
+                        : "Changes apply after you save; you can correct and resave the list at any time."}
               </p>
               <Button
                 type="submit"
@@ -525,7 +547,6 @@ export function WidgetSettings({
   const security = usePreloadedAuthQuery(preloadedSecurity) ?? {
     allowedOrigins: [],
     originPolicy: "legacy_limited" as const,
-    recentOrigins: [],
   };
   const saveSettings = useMutation(api.widgetSettings.save);
   const ensureWorkspace = useMutation(api.workspaces.ensureCurrent);
@@ -659,8 +680,9 @@ export function WidgetSettings({
           <AlertTitle>New-session protection is still in legacy-limited mode</AlertTitle>
           <AlertDescription>
             Your current widget keeps working, but new sessions are not restricted to
-            your websites yet. Review the recently observed widget origins below, add
-            every customer-facing site, and save only when the exact list is complete.
+            your websites yet. Verify the browser-reported activity below against your
+            actual installations, add every customer-facing site, and save only when
+            the exact list is complete.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -820,7 +842,6 @@ export function WidgetSettings({
             key={`${security.originPolicy}:${security.allowedOrigins.join("|")}`}
             initialOrigins={security.allowedOrigins}
             initialPolicy={security.originPolicy}
-            recentOrigins={security.recentOrigins}
           />
 
           <Card className="gap-0 py-0">

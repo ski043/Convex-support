@@ -12,7 +12,8 @@ import type { GroundedAnswerSegment, RetrievedEvidence } from "./aiModel";
 import { knowledgeNamespace } from "./knowledgeModel";
 import schema from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
-import { getRecentWidgetOrigins } from "./widgetSettings";
+import { recordWidgetOriginObservation } from "./widgetChat";
+import { getRecentWidgetOriginObservations } from "./widgetSettings";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -979,33 +980,73 @@ describe("widget bootstrap policy versioning", () => {
 });
 
 describe("widget origin enforcement guidance", () => {
-  test("recent observed widget origins are ordered and deduplicated", async () => {
+  test("browser-reported origins preserve activity and recency signals", async () => {
     const t = backend();
     const workspaceId = await createWorkspace(t, ownerA, "widget-origins");
     await t.run(async (ctx) => {
-      const now = Date.now();
-      for (const [index, origin] of [
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
         "https://shop.example.com",
+        1_000,
+      );
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
         "https://help.example.com",
+        2_000,
+      );
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
         "https://shop.example.com",
-      ].entries()) {
-        await ctx.db.insert("visitors", {
-          workspaceId,
-          capabilityToken: String(index + 4).repeat(64),
-          capabilityExpiresAt: now + 60_000,
-          capabilityExpired: false,
-          origin,
-          createdAt: now - index * 1_000,
-          lastSeenAt: now - index * 1_000,
-        });
-      }
+        3_000,
+      );
     });
 
     expect(
-      await t.run(async (ctx) => getRecentWidgetOrigins(ctx, workspaceId)),
-    ).toEqual([
-      "https://shop.example.com",
-      "https://help.example.com",
-    ]);
+      await t.run(async (ctx) =>
+        getRecentWidgetOriginObservations(ctx, workspaceId),
+      ),
+    ).toEqual({
+      origins: [
+        {
+          origin: "https://shop.example.com",
+          sessionCount: 2,
+          firstSeenAt: 1_000,
+          lastSeenAt: 3_000,
+        },
+        {
+          origin: "https://help.example.com",
+          sessionCount: 1,
+          firstSeenAt: 2_000,
+          lastSeenAt: 2_000,
+        },
+      ],
+      isTruncated: false,
+    });
+  });
+
+  test("origin guidance identifies a list that exceeds the enforceable sample", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-origin-limit");
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 21; index += 1) {
+        await recordWidgetOriginObservation(
+          ctx,
+          workspaceId,
+          `https://site-${index}.example.com`,
+          index,
+        );
+      }
+    });
+
+    const result = await t.run(async (ctx) =>
+      getRecentWidgetOriginObservations(ctx, workspaceId),
+    );
+    expect(result.isTruncated).toBe(true);
+    expect(result.origins).toHaveLength(20);
+    expect(result.origins[0]?.origin).toBe("https://site-20.example.com");
+    expect(result.origins.at(-1)?.origin).toBe("https://site-1.example.com");
   });
 });

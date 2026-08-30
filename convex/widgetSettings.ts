@@ -12,7 +12,6 @@ import { normalizeWidgetOrigin } from "../lib/widget-bootstrap-token";
 const MAX_DISPLAY_NAME_LENGTH = 40;
 const MAX_GREETING_LENGTH = 120;
 const MAX_ALLOWED_ORIGINS = 20;
-const RECENT_ORIGIN_VISITOR_LIMIT = 200;
 
 const defaultWidgetSettings = {
   displayName: "MarshalDesk support",
@@ -20,32 +19,6 @@ const defaultWidgetSettings = {
   theme: "blue",
   position: "bottomRight",
 } as const;
-
-export async function getRecentWidgetOrigins(
-  ctx: QueryCtx,
-  workspaceId: Id<"workspaces">,
-) {
-  const recentVisitors = await ctx.db
-    .query("visitors")
-    .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
-      q.eq("workspaceId", workspaceId),
-    )
-    .order("desc")
-    .take(RECENT_ORIGIN_VISITOR_LIMIT);
-  const recentOrigins: string[] = [];
-  const seenOrigins = new Set<string>();
-  for (const visitor of recentVisitors) {
-    if (
-      visitor.origin &&
-      !seenOrigins.has(visitor.origin) &&
-      recentOrigins.length < MAX_ALLOWED_ORIGINS
-    ) {
-      seenOrigins.add(visitor.origin);
-      recentOrigins.push(visitor.origin);
-    }
-  }
-  return recentOrigins;
-}
 
 async function requireOwner(ctx: QueryCtx | MutationCtx) {
   const identity = await ctx.auth.getUserIdentity();
@@ -59,6 +32,28 @@ async function requireOwner(ctx: QueryCtx | MutationCtx) {
   return {
     authUser,
     ownerTokenIdentifier: identity.tokenIdentifier,
+  };
+}
+
+export async function getRecentWidgetOriginObservations(
+  ctx: QueryCtx,
+  workspaceId: Id<"workspaces">,
+) {
+  const observations = await ctx.db
+    .query("widgetOriginObservations")
+    .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+      q.eq("workspaceId", workspaceId),
+    )
+    .order("desc")
+    .take(MAX_ALLOWED_ORIGINS + 1);
+  return {
+    origins: observations.slice(0, MAX_ALLOWED_ORIGINS).map((observation) => ({
+      origin: observation.origin,
+      sessionCount: observation.sessionCount,
+      firstSeenAt: observation.firstSeenAt,
+      lastSeenAt: observation.lastSeenAt,
+    })),
+    isTruncated: observations.length > MAX_ALLOWED_ORIGINS,
   };
 }
 
@@ -153,7 +148,6 @@ export const getSecurity = query({
   returns: v.object({
     allowedOrigins: v.array(v.string()),
     originPolicy: v.union(v.literal("legacy_limited"), v.literal("enforced")),
-    recentOrigins: v.array(v.string()),
   }),
   handler: async (ctx) => {
     const { authUser, ownerTokenIdentifier } = await requireOwner(ctx);
@@ -169,14 +163,31 @@ export const getSecurity = query({
             q.eq("ownerTokenIdentifier", ownerTokenIdentifier),
           )
           .unique();
-    const recentOrigins = workspace
-      ? await getRecentWidgetOrigins(ctx, workspace._id)
-      : [];
     return {
       allowedOrigins: settings?.allowedOrigins ?? [],
       originPolicy: settings?.originPolicy ?? "legacy_limited",
-      recentOrigins,
     };
+  },
+});
+
+export const getRecentOrigins = query({
+  args: {},
+  returns: v.object({
+    origins: v.array(
+      v.object({
+        origin: v.string(),
+        sessionCount: v.number(),
+        firstSeenAt: v.number(),
+        lastSeenAt: v.number(),
+      }),
+    ),
+    isTruncated: v.boolean(),
+  }),
+  handler: async (ctx) => {
+    const { authUser } = await requireOwner(ctx);
+    const workspace = await findWorkspaceByAuthUserId(ctx, authUser._id);
+    if (!workspace) return { origins: [], isTruncated: false };
+    return await getRecentWidgetOriginObservations(ctx, workspace._id);
   },
 });
 

@@ -50,16 +50,26 @@ function ConversationLoadingSkeleton() {
   );
 }
 
-function EmptyInbox() {
+function EmptyInbox({
+  attentionFilter,
+}: {
+  attentionFilter: "all" | "needs_human";
+}) {
   return (
     <Empty className="h-full min-h-80">
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <InboxIcon />
         </EmptyMedia>
-        <EmptyTitle>No conversations yet</EmptyTitle>
+        <EmptyTitle>
+          {attentionFilter === "needs_human"
+            ? "No conversations need a human"
+            : "No conversations yet"}
+        </EmptyTitle>
         <EmptyDescription>
-          When a visitor sends a message from your widget, it will appear here.
+          {attentionFilter === "needs_human"
+            ? "AI has not handed off any active conversations."
+            : "When a visitor sends a message from your widget, it will appear here."}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
@@ -351,7 +361,7 @@ export function Inbox() {
     ) : conversationStatus === "LoadingFirstPage" ? (
       <ConversationLoadingSkeleton />
     ) : (
-      <EmptyInbox />
+      <EmptyInbox attentionFilter={attentionFilter} />
     );
 
   return (
