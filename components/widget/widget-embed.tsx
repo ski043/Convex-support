@@ -497,8 +497,10 @@ export function WidgetEmbed({
     window.parent.postMessage(message, parentOrigin);
   }, [parentOrigin]);
 
-  const refreshBootstrapToken = useCallback(() => {
+  const refreshBootstrapToken = useCallback((capabilityToken?: string | null) => {
     if (bootstrapInFlight.current) return;
+    const renewalToken =
+      capabilityToken === undefined ? hostToken : capabilityToken;
     bootstrapInFlight.current = true;
     if (bootstrapTimeout.current) {
       window.clearTimeout(bootstrapTimeout.current);
@@ -512,7 +514,7 @@ export function WidgetEmbed({
     bootstrapTimeout.current = window.setTimeout(() => {
       bootstrapTimeout.current = undefined;
       if (!bootstrapInFlight.current) return;
-      if (!hostToken) {
+      if (!renewalToken) {
         bootstrapInFlight.current = false;
         if (mounted.current) setSessionStatus("error");
         return;
@@ -520,7 +522,7 @@ export function WidgetEmbed({
       void requestWidgetBootstrapRenewal(
         workspaceId,
         parentOrigin,
-        hostToken,
+        renewalToken,
       )
         .then((bootstrapToken) => {
           if (!mounted.current || !bootstrapInFlight.current) return;
@@ -538,17 +540,18 @@ export function WidgetEmbed({
 
   const handleBootstrapMessage = useEffectEvent(
     (data: Record<string, unknown>) => {
+      const incomingToken = data.token;
       if (
-        data.token !== null &&
-        (typeof data.token !== "string" ||
-          !data.token ||
-          data.token.length > 4096)
+        incomingToken !== null &&
+        (typeof incomingToken !== "string" ||
+          !incomingToken ||
+          incomingToken.length > 4096)
       ) {
         return;
       }
       const context = cleanPageContext(data.context, parentOrigin);
       if (!context) return;
-      setHostToken(data.token);
+      setHostToken(incomingToken);
       setPageContext(context);
       if (
         typeof data.bootstrapToken === "string" &&
@@ -565,7 +568,7 @@ export function WidgetEmbed({
           setSessionStatus("waiting");
         }
       } else {
-        refreshBootstrapToken();
+        refreshBootstrapToken(incomingToken);
       }
     },
   );

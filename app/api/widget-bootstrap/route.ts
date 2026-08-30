@@ -7,8 +7,7 @@ import {
   WIDGET_BOOTSTRAP_TTL_MS,
   WIDGET_BOOTSTRAP_VERSION,
 } from "@/lib/widget-bootstrap-token";
-
-const workspacePattern = /^[A-Za-z0-9_-]{1,128}$/u;
+import { parseWidgetBootstrapRequest } from "@/lib/widget-bootstrap-request";
 
 function corsHeaders(origin: string | null) {
   const headers = new Headers({
@@ -47,37 +46,14 @@ export async function POST(request: Request) {
     return reject(requestOrigin, 415);
   }
 
-  let workspaceId: string;
-  let renewal: { capabilityToken: string; origin: string } | null = null;
+  let parsed: ReturnType<typeof parseWidgetBootstrapRequest>;
   try {
-    const body: unknown = await request.json();
-    if (!body || typeof body !== "object") return reject(requestOrigin, 400);
-    const record = body as Record<string, unknown>;
-    const candidate = record.workspaceId;
-    if (typeof candidate !== "string" || !workspacePattern.test(candidate)) {
-      return reject(requestOrigin, 400);
-    }
-    workspaceId = candidate;
-
-    const serverOrigin = normalizeWidgetOrigin(new URL(request.url).origin);
-    const parentOrigin = normalizeWidgetOrigin(
-      typeof record.parentOrigin === "string" ? record.parentOrigin : null,
-    );
-    const capabilityToken =
-      typeof record.capabilityToken === "string" &&
-      /^[0-9a-f]{64}$/u.test(record.capabilityToken)
-        ? record.capabilityToken
-        : null;
-    if (
-      requestOrigin === serverOrigin &&
-      parentOrigin &&
-      capabilityToken
-    ) {
-      renewal = { capabilityToken, origin: parentOrigin };
-    }
+    parsed = parseWidgetBootstrapRequest(await request.json());
   } catch {
     return reject(requestOrigin, 400);
   }
+  if (!parsed) return reject(requestOrigin, 400);
+  const { workspaceId, renewal } = parsed;
 
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
   const secret = process.env.WIDGET_BOOTSTRAP_SECRET;

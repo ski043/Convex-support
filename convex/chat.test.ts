@@ -19,6 +19,7 @@ import {
   WIDGET_BOOTSTRAP_VERSION,
 } from "../lib/widget-bootstrap-token";
 import { WIDGET_HUMAN_REQUEST_MESSAGE } from "../lib/widget-embed-contract";
+import { parseWidgetBootstrapRequest } from "../lib/widget-bootstrap-request";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -267,6 +268,53 @@ async function firstConversation(t: TestBackend, workspaceId: WorkspaceId) {
   }
   return conversation;
 }
+
+describe("widget bootstrap request parsing", () => {
+  const workspaceId = "workspace_123";
+  const capabilityToken = "a".repeat(64);
+
+  test("keeps ordinary bootstraps separate from explicit renewals", () => {
+    expect(parseWidgetBootstrapRequest({ workspaceId })).toEqual({
+      workspaceId,
+      renewal: null,
+    });
+    expect(
+      parseWidgetBootstrapRequest({
+        workspaceId,
+        parentOrigin: "https://shop.example.test",
+        capabilityToken,
+      }),
+    ).toEqual({
+      workspaceId,
+      renewal: {
+        origin: "https://shop.example.test",
+        capabilityToken,
+      },
+    });
+  });
+
+  test("rejects incomplete or malformed renewal intent", () => {
+    expect(
+      parseWidgetBootstrapRequest({
+        workspaceId,
+        parentOrigin: "https://shop.example.test",
+      }),
+    ).toBeNull();
+    expect(
+      parseWidgetBootstrapRequest({
+        workspaceId,
+        capabilityToken,
+      }),
+    ).toBeNull();
+    expect(
+      parseWidgetBootstrapRequest({
+        workspaceId,
+        parentOrigin: "not-an-origin",
+        capabilityToken: "not-a-capability",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("visitor sessions and isolation", () => {
   test("bootstrap renewal is limited to a live capability's bound origin", async () => {
