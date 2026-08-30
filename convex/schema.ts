@@ -122,10 +122,12 @@ export default defineSchema({
     createdAt: v.number(),
     lastSeenAt: v.number(),
     ...visitorContextFields,
-  }).index("by_workspaceId_and_capabilityToken", [
-    "workspaceId",
-    "capabilityToken",
-  ]),
+  })
+    .index("by_workspaceId_and_capabilityToken", [
+      "workspaceId",
+      "capabilityToken",
+    ])
+    .index("by_workspaceId_and_lastSeenAt", ["workspaceId", "lastSeenAt"]),
   conversations: defineTable({
     workspaceId: v.id("workspaces"),
     visitorId: v.id("visitors"),

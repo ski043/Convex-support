@@ -22,8 +22,8 @@ grounding evaluation.
 
 Set these independently for every Convex deployment:
 
-- `OPENAI_API_KEY`: embedding-provider key. It is read only by Convex Node
-  actions.
+- `OPENAI_API_KEY`: embedding-provider key. Convex functions use it during
+  source ingestion and answer-time retrieval; it is never exposed to browsers.
 - `WIDGET_BOOTSTRAP_SECRET`: random secret of at least 32 characters used to
   validate short-lived widget bootstrap tokens.
 - `AI_AUTOMATION_ENABLED`: optional emergency switch. Any value other than the

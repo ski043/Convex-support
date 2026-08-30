@@ -70,7 +70,8 @@ export function AiSettingsCard({
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
-  const enabledButUnavailable = enabled && !initialSettings.globalAvailable;
+  const enabledButUnavailable =
+    initialSettings.enabled && !initialSettings.globalAvailable;
 
   function updateEnabled(nextEnabled: boolean) {
     setEnabled(nextEnabled);
@@ -107,10 +108,18 @@ export function AiSettingsCard({
         <CardAction>
           <Badge
             variant={
-              enabledButUnavailable ? "destructive" : enabled ? "secondary" : "outline"
+              enabledButUnavailable
+                ? "destructive"
+                : initialSettings.effectiveEnabled
+                  ? "secondary"
+                  : "outline"
             }
           >
-            {enabledButUnavailable ? "Unavailable" : enabled ? "Enabled" : "Paused"}
+            {enabledButUnavailable
+              ? "Unavailable"
+              : initialSettings.effectiveEnabled
+                ? "Enabled"
+                : "Paused"}
           </Badge>
         </CardAction>
       </CardHeader>

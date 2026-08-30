@@ -38,6 +38,17 @@ import {
 import { api } from "@/convex/_generated/api";
 import { useTypingPresence } from "@/hooks/use-typing-presence";
 
+function automationErrorMessage(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+  const data = (error as Error & { data?: unknown }).data;
+  if (data && typeof data === "object" && "message" in data) {
+    const message = (data as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  if (typeof data === "string" && data.trim()) return data.trim();
+  return fallback;
+}
+
 function Composer({
   draft,
   visitorLabel,
@@ -176,11 +187,14 @@ export function ConversationDisplay({
       } else {
         await resumeAi({ conversationId: conversation._id });
       }
-    } catch {
+    } catch (error) {
       setAutomationError(
-        action === "takeover"
-          ? "AI could not be paused. Try again before replying."
-          : "AI could not be resumed. Try again.",
+        automationErrorMessage(
+          error,
+          action === "takeover"
+            ? "AI could not be paused. Try again before replying."
+            : "AI could not be resumed. Try again.",
+        ),
       );
     } finally {
       setAutomationAction(null);

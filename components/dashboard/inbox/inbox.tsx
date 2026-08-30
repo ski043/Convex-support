@@ -192,10 +192,16 @@ export function Inbox() {
 
   function changeAttentionFilter(value: "all" | "needs_human") {
     if (value === attentionFilter) return;
+    activeConversationId.current = null;
     setAttentionFilter(value);
     setSelectedId(null);
+    setDraft("");
     setMobileThreadOpen(false);
     setQuery("");
+    replyAttempt.current = null;
+    resolveAttempt.current = null;
+    setReplyState({ conversationId: null, pending: false, error: null });
+    setResolveState({ conversationId: null, pending: false, error: null });
   }
 
   function changeDraft(value: string) {
@@ -303,9 +309,7 @@ export function Inbox() {
   const listPane = (
     <ConversationListPane
       conversations={filtered}
-      hasAnyConversations={
-        attentionFilter === "needs_human" || conversations.length > 0
-      }
+      hasAnyConversations={conversations.length > 0}
       totalConversationCount={conversations.length}
       totalUnreadCount={totalUnreadCount}
       selectedId={selectedId}

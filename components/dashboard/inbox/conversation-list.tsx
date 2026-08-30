@@ -201,11 +201,17 @@ export function ConversationListPane({
                 {hasAnyConversations ? <SearchXIcon /> : <InboxIcon />}
               </EmptyMedia>
               <EmptyTitle>
-                {hasAnyConversations ? "No matching conversations" : "No conversations yet"}
+                {hasAnyConversations
+                  ? "No matching conversations"
+                  : attentionFilter === "needs_human"
+                    ? "No conversations need a human"
+                    : "No conversations yet"}
               </EmptyTitle>
               <EmptyDescription>
                 {hasAnyConversations
                   ? "Try a visitor label or a phrase from the latest message."
+                  : attentionFilter === "needs_human"
+                    ? "AI has not handed off any active conversations."
                   : "New visitor messages will appear here in real time."}
               </EmptyDescription>
             </EmptyHeader>

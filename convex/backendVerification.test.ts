@@ -12,6 +12,7 @@ import type { GroundedAnswerSegment, RetrievedEvidence } from "./aiModel";
 import { knowledgeNamespace } from "./knowledgeModel";
 import schema from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
+import { getRecentWidgetOrigins } from "./widgetSettings";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -974,5 +975,37 @@ describe("widget bootstrap policy versioning", () => {
         ),
       ).toMatchObject({ allowed: true, policyVersion: 50 });
     });
+  });
+});
+
+describe("widget origin enforcement guidance", () => {
+  test("recent observed widget origins are ordered and deduplicated", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-origins");
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      for (const [index, origin] of [
+        "https://shop.example.com",
+        "https://help.example.com",
+        "https://shop.example.com",
+      ].entries()) {
+        await ctx.db.insert("visitors", {
+          workspaceId,
+          capabilityToken: String(index + 4).repeat(64),
+          capabilityExpiresAt: now + 60_000,
+          capabilityExpired: false,
+          origin,
+          createdAt: now - index * 1_000,
+          lastSeenAt: now - index * 1_000,
+        });
+      }
+    });
+
+    expect(
+      await t.run(async (ctx) => getRecentWidgetOrigins(ctx, workspaceId)),
+    ).toEqual([
+      "https://shop.example.com",
+      "https://help.example.com",
+    ]);
   });
 });

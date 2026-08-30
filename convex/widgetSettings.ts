@@ -1,4 +1,5 @@
 import { ConvexError, v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { authComponent } from "./auth";
 import { widgetSettingsValidator } from "./schema";
@@ -11,6 +12,7 @@ import { normalizeWidgetOrigin } from "../lib/widget-bootstrap-token";
 const MAX_DISPLAY_NAME_LENGTH = 40;
 const MAX_GREETING_LENGTH = 120;
 const MAX_ALLOWED_ORIGINS = 20;
+const RECENT_ORIGIN_VISITOR_LIMIT = 200;
 
 const defaultWidgetSettings = {
   displayName: "MarshalDesk support",
@@ -18,6 +20,32 @@ const defaultWidgetSettings = {
   theme: "blue",
   position: "bottomRight",
 } as const;
+
+export async function getRecentWidgetOrigins(
+  ctx: QueryCtx,
+  workspaceId: Id<"workspaces">,
+) {
+  const recentVisitors = await ctx.db
+    .query("visitors")
+    .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+      q.eq("workspaceId", workspaceId),
+    )
+    .order("desc")
+    .take(RECENT_ORIGIN_VISITOR_LIMIT);
+  const recentOrigins: string[] = [];
+  const seenOrigins = new Set<string>();
+  for (const visitor of recentVisitors) {
+    if (
+      visitor.origin &&
+      !seenOrigins.has(visitor.origin) &&
+      recentOrigins.length < MAX_ALLOWED_ORIGINS
+    ) {
+      seenOrigins.add(visitor.origin);
+      recentOrigins.push(visitor.origin);
+    }
+  }
+  return recentOrigins;
+}
 
 async function requireOwner(ctx: QueryCtx | MutationCtx) {
   const identity = await ctx.auth.getUserIdentity();
@@ -125,6 +153,7 @@ export const getSecurity = query({
   returns: v.object({
     allowedOrigins: v.array(v.string()),
     originPolicy: v.union(v.literal("legacy_limited"), v.literal("enforced")),
+    recentOrigins: v.array(v.string()),
   }),
   handler: async (ctx) => {
     const { authUser, ownerTokenIdentifier } = await requireOwner(ctx);
@@ -140,9 +169,13 @@ export const getSecurity = query({
             q.eq("ownerTokenIdentifier", ownerTokenIdentifier),
           )
           .unique();
+    const recentOrigins = workspace
+      ? await getRecentWidgetOrigins(ctx, workspace._id)
+      : [];
     return {
       allowedOrigins: settings?.allowedOrigins ?? [],
       originPolicy: settings?.originPolicy ?? "legacy_limited",
+      recentOrigins,
     };
   },
 });

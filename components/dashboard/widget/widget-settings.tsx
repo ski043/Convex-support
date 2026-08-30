@@ -155,18 +155,18 @@ function ownerSafeError(error: unknown, fallback: string) {
 function OriginSecuritySettings({
   initialOrigins,
   initialPolicy,
-  dashboardOrigin,
+  recentOrigins,
 }: {
   initialOrigins: string[];
   initialPolicy: OriginPolicy;
-  dashboardOrigin: string;
+  recentOrigins: string[];
 }) {
   const saveSecurity = useMutation(api.widgetSettings.saveSecurity);
   const [origins, setOrigins] = useState<OriginDraft[]>(() =>
-    (initialOrigins.length > 0
-      ? initialOrigins
-      : [initialPolicy === "legacy_limited" ? dashboardOrigin : ""]
-    ).map((value, index) => ({ id: `origin-${index}`, value })),
+    (initialOrigins.length > 0 ? initialOrigins : [""]).map((value, index) => ({
+      id: `origin-${index}`,
+      value,
+    })),
   );
   const [policy, setPolicy] = useState<OriginPolicy>(initialPolicy);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
@@ -199,6 +199,24 @@ function OriginSecuritySettings({
     setOrigins((current) => {
       if (current.length === 1) return [{ ...current[0], value: "" }];
       return current.filter((origin) => origin.id !== id);
+    });
+    setSaveStatus("idle");
+    setSaveError(null);
+  }
+
+  function addRecentOrigin(value: string) {
+    const id = `origin-${nextOriginId.current}`;
+    nextOriginId.current += 1;
+    setOrigins((current) => {
+      if (current.some((origin) => origin.value.trim() === value)) return current;
+      const emptyIndex = current.findIndex((origin) => !origin.value.trim());
+      if (emptyIndex >= 0) {
+        return current.map((origin, index) =>
+          index === emptyIndex ? { ...origin, value } : origin,
+        );
+      }
+      if (current.length >= 20) return current;
+      return [...current, { id, value }];
     });
     setSaveStatus("idle");
     setSaveError(null);
@@ -285,6 +303,40 @@ function OriginSecuritySettings({
                 </Field>
               );
             })}
+
+            {recentOrigins.length > 0 ? (
+              <FieldSet>
+                <FieldLegend variant="label">Recently seen widget origins</FieldLegend>
+                <div className="flex flex-wrap gap-2">
+                  {recentOrigins.map((origin) => (
+                    <Button
+                      key={origin}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-auto max-w-full font-mono text-xs"
+                      disabled={origins.some(
+                        (candidate) => candidate.value.trim() === origin,
+                      )}
+                      onClick={() => addRecentOrigin(origin)}
+                    >
+                      <PlusIcon aria-hidden />
+                      <span className="truncate">{origin}</span>
+                    </Button>
+                  ))}
+                </div>
+                <FieldDescription>
+                  These origins recently created or refreshed a widget session. Add
+                  every customer-facing site that should keep accepting new sessions.
+                </FieldDescription>
+              </FieldSet>
+            ) : policy === "legacy_limited" ? (
+              <FieldDescription>
+                No widget origins have been observed yet. Open the widget once on each
+                installed customer site, then reload this page to review them before
+                enforcing the list.
+              </FieldDescription>
+            ) : null}
           </FieldGroup>
 
           {saveError ? <FieldError>{saveError}</FieldError> : null}
@@ -317,7 +369,7 @@ function OriginSecuritySettings({
                     : saveStatus === "error"
                       ? "Origins were not saved."
                       : policy === "legacy_limited"
-                        ? "Review and save to enable enforcement."
+                        ? "Saving immediately enables enforcement for this exact list."
                         : "Changes apply after you save."}
               </p>
               <Button
@@ -332,7 +384,11 @@ function OriginSecuritySettings({
                 ) : (
                   <Globe2Icon data-icon="inline-start" />
                 )}
-                {saveStatus === "saving" ? "Saving" : "Save origins"}
+                {saveStatus === "saving"
+                  ? "Saving"
+                  : policy === "legacy_limited"
+                    ? "Save and enforce"
+                    : "Save origins"}
               </Button>
             </div>
           </div>
@@ -469,6 +525,7 @@ export function WidgetSettings({
   const security = usePreloadedAuthQuery(preloadedSecurity) ?? {
     allowedOrigins: [],
     originPolicy: "legacy_limited" as const,
+    recentOrigins: [],
   };
   const saveSettings = useMutation(api.widgetSettings.save);
   const ensureWorkspace = useMutation(api.workspaces.ensureCurrent);
@@ -602,8 +659,8 @@ export function WidgetSettings({
           <AlertTitle>New-session protection is still in legacy-limited mode</AlertTitle>
           <AlertDescription>
             Your current widget keeps working, but new sessions are not restricted to
-            your websites yet. Review the suggested dashboard origin below, replace it
-            with your customer-facing site if needed, and save to enforce the exact list.
+            your websites yet. Review the recently observed widget origins below, add
+            every customer-facing site, and save only when the exact list is complete.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -759,21 +816,12 @@ export function WidgetSettings({
             </CardContent>
           </Card>
 
-          {dashboardOrigin ? (
-            <OriginSecuritySettings
-              key={`${security.originPolicy}:${security.allowedOrigins.join("|")}`}
-              initialOrigins={security.allowedOrigins}
-              initialPolicy={security.originPolicy}
-              dashboardOrigin={dashboardOrigin}
-            />
-          ) : (
-            <Card size="sm">
-              <CardHeader>
-                <CardTitle>Allowed website origins</CardTitle>
-                <CardDescription>Preparing security controls…</CardDescription>
-              </CardHeader>
-            </Card>
-          )}
+          <OriginSecuritySettings
+            key={`${security.originPolicy}:${security.allowedOrigins.join("|")}`}
+            initialOrigins={security.allowedOrigins}
+            initialPolicy={security.originPolicy}
+            recentOrigins={security.recentOrigins}
+          />
 
           <Card className="gap-0 py-0">
             <CardHeader className="border-b py-(--card-spacing)">

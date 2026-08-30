@@ -319,7 +319,7 @@ export function Thread({
                           <BubbleContent>{message.body}</BubbleContent>
                         </Bubble>
                         <MessageFooter>{messageTime(message.createdAt)}</MessageFooter>
-                        {fromAssistant ? (
+                        {message.author === "assistant" ? (
                           <EvidenceDisclosure messageId={message._id} />
                         ) : null}
                       </MessageContent>
