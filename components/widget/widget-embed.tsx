@@ -517,7 +517,9 @@ export function WidgetEmbed({
         }
         bootstrapInFlight.current = false;
         setHostBootstrapToken(data.bootstrapToken);
-        setSessionStatus("waiting");
+        if (sessionStatus !== "ready") {
+          setSessionStatus("waiting");
+        }
       } else {
         refreshBootstrapToken();
       }
