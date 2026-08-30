@@ -499,6 +499,11 @@ export async function queueVisitorMessageInTransaction(
   const state = await getOrCreateConversationState(ctx, conversation, now);
 
   if (state.mode === "human" && !args.reopened && !args.forceAi) {
+    if (state.attention === "needs_human") {
+      await ctx.db.patch("aiConversationStates", state._id, {
+        updatedAt: now,
+      });
+    }
     return { queued: false, reason: "human_mode" };
   }
 
@@ -1489,6 +1494,65 @@ async function guardedRunState(ctx: MutationCtx, runId: Id<"aiRuns">) {
   };
 }
 
+async function guardedIncompleteHistoryHandoffState(
+  ctx: MutationCtx,
+  runId: Id<"aiRuns">,
+) {
+  const run = await ctx.db.get("aiRuns", runId);
+  if (!run) return null;
+  const [state, conversation, trigger] = await Promise.all([
+    ctx.db
+      .query("aiConversationStates")
+      .withIndex("by_conversationId", (q) =>
+        q.eq("conversationId", run.conversationId),
+      )
+      .unique(),
+    ctx.db.get("conversations", run.conversationId),
+    ctx.db.get("messages", run.triggerMessageId),
+  ]);
+  const settings = await effectiveAiSettings(ctx, run.workspaceId);
+  if (!settings.enabled) {
+    await transitionActiveRunToDisabled(
+      ctx,
+      run,
+      state,
+      Date.now(),
+      "AI automation was disabled before the run could hand off.",
+    );
+    return null;
+  }
+  const newerMessages =
+    conversation && trigger
+      ? await ctx.db
+          .query("messages")
+          .withIndex("by_conversationId_and_sequence", (q) =>
+            q
+              .eq("conversationId", run.conversationId)
+              .gt("sequence", trigger.sequence),
+          )
+          .order("asc")
+          .take(51)
+      : [];
+  if (
+    !state ||
+    !conversation ||
+    !trigger ||
+    conversation.status !== "open" ||
+    state.workspaceId !== run.workspaceId ||
+    state.mode !== "ai" ||
+    state.activeRunId !== run._id ||
+    state.generationEpoch !== run.epoch ||
+    trigger.workspaceId !== run.workspaceId ||
+    trigger.conversationId !== run.conversationId ||
+    trigger.author !== "visitor" ||
+    newerMessages.length > 50 ||
+    newerMessages.some((message) => message.author === "visitor")
+  ) {
+    return null;
+  }
+  return { run, state, conversation, trigger };
+}
+
 export const commitCandidate = internalMutation({
   args: {
     runId: v.id("aiRuns"),
@@ -1675,7 +1739,10 @@ export const handoffRun = internalMutation({
     v.object({ status: v.literal("stale") }),
   ),
   handler: async (ctx, args) => {
-    const guarded = await guardedRunState(ctx, args.runId);
+    const incompleteHistory = args.reason === "history_sync_limit";
+    const guarded = incompleteHistory
+      ? await guardedIncompleteHistoryHandoffState(ctx, args.runId)
+      : await guardedRunState(ctx, args.runId);
     if (!guarded) {
       const run = await ctx.db.get("aiRuns", args.runId);
       if (run && (run.status === "queued" || run.status === "running")) {
@@ -1725,12 +1792,18 @@ export const handoffRun = internalMutation({
     if (!canonicalMessage) {
       throw new Error("Handoff message could not be read back.");
     }
-    await mirrorCanonicalMessage(
-      ctx,
-      guarded.state,
-      guarded.agentThreadId,
-      canonicalMessage,
-    );
+    if (
+      !incompleteHistory &&
+      "agentThreadId" in guarded &&
+      typeof guarded.agentThreadId === "string"
+    ) {
+      await mirrorCanonicalMessage(
+        ctx,
+        guarded.state,
+        guarded.agentThreadId,
+        canonicalMessage,
+      );
+    }
     await ctx.db.patch("conversations", guarded.conversation._id, {
       hasMessages: true,
       updatedAt: now,
@@ -1754,7 +1827,9 @@ export const handoffRun = internalMutation({
       consecutiveAiFailures: isGreetingResponse
         ? currentFailures
         : consecutiveFailures,
-      syncedThroughSequence: canonicalMessage.sequence,
+      ...(incompleteHistory
+        ? {}
+        : { syncedThroughSequence: canonicalMessage.sequence }),
       updatedAt: now,
     });
     return shouldHandoff

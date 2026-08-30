@@ -3,6 +3,7 @@ const loaderSource = String.raw`(function () {
 
   var MESSAGE_MARKER = "marshaldesk-widget-v1";
   var BOOTSTRAP_TYPE = "bootstrap";
+  var BOOTSTRAP_REQUEST_TYPE = "bootstrap-request";
   var CONTEXT_TYPE = "context";
   var READY_TYPE = "ready";
   var TOKEN_TYPE = "token";
@@ -230,6 +231,11 @@ const loaderSource = String.raw`(function () {
       return;
     }
 
+    if (data.type === BOOTSTRAP_REQUEST_TYPE) {
+      requestBootstrap(1, false);
+      return;
+    }
+
     if (data.type === TOKEN_TYPE) {
       if (typeof data.token !== "string" || !data.token) return;
       token = data.token;
@@ -292,7 +298,7 @@ const loaderSource = String.raw`(function () {
     }
   }
 
-  function requestBootstrap(attempt) {
+  function requestBootstrap(attempt, mountAfterSuccess) {
     fetch(widgetOrigin + "/api/widget-bootstrap", {
       method: "POST",
       mode: "cors",
@@ -315,12 +321,16 @@ const loaderSource = String.raw`(function () {
           throw new Error("invalid bootstrap");
         }
         bootstrapToken = result.bootstrapToken;
-        mountWhenReady();
+        if (mountAfterSuccess) {
+          mountWhenReady();
+        } else {
+          postBootstrap();
+        }
       })
       .catch(function (error) {
         if (attempt < 3) {
           window.setTimeout(function () {
-            requestBootstrap(attempt + 1);
+            requestBootstrap(attempt + 1, mountAfterSuccess);
           }, attempt * 300);
           return;
         }
@@ -331,7 +341,7 @@ const loaderSource = String.raw`(function () {
       });
   }
 
-  requestBootstrap(1);
+  requestBootstrap(1, true);
 })();`;
 
 export async function GET() {

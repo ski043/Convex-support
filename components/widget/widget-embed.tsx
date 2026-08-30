@@ -71,6 +71,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useTypingPresence } from "@/hooks/use-typing-presence";
 import {
   WIDGET_BOOTSTRAP_MESSAGE_TYPE,
+  WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE,
   WIDGET_CLOSED_FRAME_SIZE,
   WIDGET_CONTEXT_MESSAGE_TYPE,
   WIDGET_FRAME_MESSAGE_TYPE,
@@ -319,30 +320,6 @@ function cleanPlatformContext(value: unknown): PlatformContext | null {
   };
 }
 
-async function requestWidgetBootstrapToken(
-  workspaceId: Id<"workspaces">,
-  parentOrigin: string,
-) {
-  const response = await fetch("/api/widget-bootstrap", {
-    method: "POST",
-    credentials: "omit",
-    cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId, parentOrigin }),
-  });
-  if (!response.ok) throw new Error("Widget bootstrap was rejected.");
-  const result: unknown = await response.json();
-  if (
-    !isRecord(result) ||
-    typeof result.bootstrapToken !== "string" ||
-    !result.bootstrapToken ||
-    result.bootstrapToken.length > 4_096
-  ) {
-    throw new Error("Widget bootstrap was invalid.");
-  }
-  return result.bootstrapToken;
-}
-
 function newClientMessageId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
 
@@ -494,23 +471,21 @@ export function WidgetEmbed({
     window.parent.postMessage(message, parentOrigin);
   }, [parentOrigin]);
 
-  const refreshBootstrapToken = useCallback(async () => {
+  const refreshBootstrapToken = useCallback(() => {
     if (bootstrapInFlight.current) return;
     bootstrapInFlight.current = true;
     setHostBootstrapToken(undefined);
     setSessionStatus("waiting");
-    try {
-      const bootstrapToken = await requestWidgetBootstrapToken(
-        workspaceId,
-        parentOrigin,
-      );
-      if (mounted.current) setHostBootstrapToken(bootstrapToken);
-    } catch {
-      if (mounted.current) setSessionStatus("error");
-    } finally {
+    postToParent({
+      marker: WIDGET_MESSAGE_MARKER,
+      type: WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE,
+    });
+    window.setTimeout(() => {
+      if (!bootstrapInFlight.current) return;
       bootstrapInFlight.current = false;
-    }
-  }, [parentOrigin, workspaceId]);
+      if (mounted.current) setSessionStatus("error");
+    }, 5_000);
+  }, [postToParent]);
 
   const handleBootstrapMessage = useEffectEvent(
     (data: Record<string, unknown>) => {
@@ -531,11 +506,10 @@ export function WidgetEmbed({
         data.bootstrapToken &&
         data.bootstrapToken.length <= 4_096
       ) {
+        bootstrapInFlight.current = false;
         setHostBootstrapToken(data.bootstrapToken);
       } else {
-        // Older cached loaders do not send a bootstrap token. Recover inside
-        // the iframe so a stale script cannot leave the widget connecting.
-        void refreshBootstrapToken();
+        refreshBootstrapToken();
       }
     },
   );
@@ -779,7 +753,7 @@ export function WidgetEmbed({
         title="Couldn’t connect"
         description="Reload the page or try connecting again."
         onRetry={() => {
-          void refreshBootstrapToken();
+          refreshBootstrapToken();
         }}
       />
     );

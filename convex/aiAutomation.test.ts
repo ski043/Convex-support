@@ -1406,6 +1406,78 @@ describe("AI run concurrency and idempotency", () => {
     });
   });
 
+  test("a new visitor message refreshes needs-human inbox ordering", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-30T12:00:00.000Z"));
+    try {
+      const t = makeBackend();
+      const workspaceId = await createWorkspace(t);
+      const fixture = await createConversationWithVisitorMessage(t, workspaceId);
+      const queued = await t.mutation(queueVisitor, {
+        ...fixture,
+        reopened: false,
+      });
+      if (!queued.queued) throw new Error("Expected run");
+      await t.withIdentity(ownerIdentity).mutation(takeOver, {
+        conversationId: fixture.conversationId,
+      });
+      await t.run(async (ctx) => {
+        const state = await ctx.db
+          .query("aiConversationStates")
+          .withIndex("by_conversationId", (q) =>
+            q.eq("conversationId", fixture.conversationId),
+          )
+          .unique();
+        if (!state) throw new Error("Expected automation state");
+        await ctx.db.patch("aiConversationStates", state._id, {
+          attention: "needs_human",
+          handoffReason: "low_confidence",
+        });
+      });
+      const before = await t.run(async (ctx) =>
+        ctx.db
+          .query("aiConversationStates")
+          .withIndex("by_conversationId", (q) =>
+            q.eq("conversationId", fixture.conversationId),
+          )
+          .unique(),
+      );
+      if (!before) throw new Error("Expected automation state");
+
+      vi.setSystemTime(new Date("2026-08-30T12:01:00.000Z"));
+      const messageId = await appendVisitorMessage(
+        t,
+        workspaceId,
+        fixture.conversationId,
+        2,
+      );
+      expect(
+        await t.mutation(queueVisitor, {
+          conversationId: fixture.conversationId,
+          messageId,
+          reopened: false,
+        }),
+      ).toEqual({ queued: false, reason: "human_mode" });
+
+      const after = await t.run(async (ctx) =>
+        ctx.db
+          .query("aiConversationStates")
+          .withIndex("by_conversationId", (q) =>
+            q.eq("conversationId", fixture.conversationId),
+          )
+          .unique(),
+      );
+      expect(after).toMatchObject({
+        mode: "human",
+        attention: "needs_human",
+        updatedAt: Date.parse("2026-08-30T12:01:00.000Z"),
+      });
+      expect(after?.updatedAt).toBeGreaterThan(before.updatedAt);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("resume after an owner answer only enables AI for the next visitor", async () => {
     const t = makeBackend();
     const workspaceId = await createWorkspace(t);
@@ -1759,6 +1831,57 @@ describe("AI run concurrency and idempotency", () => {
       attention: "needs_human",
       consecutiveAiFailures: 3,
     });
+  });
+
+  test("history sync exhaustion hands off without claiming unsynced history", async () => {
+    const t = makeBackend();
+    const workspaceId = await createWorkspace(t);
+    const fixture = await createConversationWithVisitorMessage(t, workspaceId);
+    const queued = await t.mutation(queueVisitor, {
+      ...fixture,
+      reopened: false,
+    });
+    if (!queued.queued) throw new Error("Expected run");
+
+    const result = await t.mutation(handoffRun, {
+      runId: queued.runId,
+      reason: "history_sync_limit",
+      errorCode: "history_sync_limit",
+      errorMessage: "The conversation history is too large to synchronize safely.",
+    });
+    expect(result.status).toBe("handed_off");
+
+    const snapshot = await t.run(async (ctx) => ({
+      run: await ctx.db.get("aiRuns", queued.runId),
+      state: await ctx.db
+        .query("aiConversationStates")
+        .withIndex("by_conversationId", (q) =>
+          q.eq("conversationId", fixture.conversationId),
+        )
+        .unique(),
+      messages: await ctx.db
+        .query("messages")
+        .withIndex("by_conversationId_and_sequence", (q) =>
+          q.eq("conversationId", fixture.conversationId),
+        )
+        .order("asc")
+        .take(10),
+    }));
+    expect(snapshot.run).toMatchObject({
+      status: "handed_off",
+      errorCode: "history_sync_limit",
+    });
+    expect(snapshot.state).toMatchObject({
+      mode: "human",
+      attention: "needs_human",
+      handoffReason: "history_sync_limit",
+      syncedThroughSequence: 0,
+    });
+    expect(snapshot.state?.activeRunId).toBeUndefined();
+    expect(snapshot.messages.map((message) => message.kind)).toEqual([
+      undefined,
+      "handoff",
+    ]);
   });
 
   test("a greeting gets an AI reply without incrementing failures", async () => {

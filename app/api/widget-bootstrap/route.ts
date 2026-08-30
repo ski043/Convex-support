@@ -48,7 +48,6 @@ export async function POST(request: Request) {
   }
 
   let workspaceId: string;
-  let policyOrigin = requestOrigin;
   try {
     const body: unknown = await request.json();
     if (!body || typeof body !== "object") return reject(requestOrigin, 400);
@@ -57,19 +56,6 @@ export async function POST(request: Request) {
       return reject(requestOrigin, 400);
     }
     workspaceId = candidate;
-
-    const serverOrigin = normalizeWidgetOrigin(new URL(request.url).origin);
-    const parentOrigin = normalizeWidgetOrigin(
-      typeof (body as Record<string, unknown>).parentOrigin === "string"
-        ? ((body as Record<string, unknown>).parentOrigin as string)
-        : null,
-    );
-    // A widget iframe can renew a consumed or expired bootstrap token. Only
-    // same-origin callers may supply the embedding page origin; cross-origin
-    // loader requests are always authorized against their actual Origin.
-    if (serverOrigin === requestOrigin && parentOrigin) {
-      policyOrigin = parentOrigin;
-    }
   } catch {
     return reject(requestOrigin, 400);
   }
@@ -84,7 +70,7 @@ export async function POST(request: Request) {
     const client = new ConvexHttpClient(convexUrl);
     const policy = await client.query(api.widgetBootstrap.getPolicy, {
       workspaceId: workspaceId as Id<"workspaces">,
-      origin: policyOrigin,
+      origin: requestOrigin,
     });
     if (!policy?.allowed) return reject(requestOrigin);
 
@@ -93,7 +79,7 @@ export async function POST(request: Request) {
       {
         version: WIDGET_BOOTSTRAP_VERSION,
         workspaceId,
-        origin: policyOrigin,
+        origin: requestOrigin,
         policyVersion: policy.policyVersion,
         issuedAt,
         expiresAt: issuedAt + WIDGET_BOOTSTRAP_TTL_MS,

@@ -5,6 +5,7 @@ export const WIDGET_PARENT_ORIGIN_SEARCH_PARAM = "parentOrigin";
 export const WIDGET_DEFAULT_OPEN_SEARCH_PARAM = "open";
 
 export const WIDGET_BOOTSTRAP_MESSAGE_TYPE = "bootstrap";
+export const WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE = "bootstrap-request";
 export const WIDGET_CONTEXT_MESSAGE_TYPE = "context";
 export const WIDGET_READY_MESSAGE_TYPE = "ready";
 export const WIDGET_TOKEN_MESSAGE_TYPE = "token";
@@ -51,6 +52,11 @@ export type WidgetBootstrapMessage = {
   token: string | null;
   bootstrapToken: string;
   context: WidgetPageContext;
+};
+
+export type WidgetBootstrapRequestMessage = {
+  marker: typeof WIDGET_MESSAGE_MARKER;
+  type: typeof WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE;
 };
 
 export type WidgetContextMessage = {
