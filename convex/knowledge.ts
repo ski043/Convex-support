@@ -114,6 +114,7 @@ const documentListItemValidator = v.object({
   status: knowledgeStatusValidator,
   errorCode: v.optional(v.string()),
   errorMessage: v.optional(v.string()),
+  canRetry: v.boolean(),
   createdAt: v.number(),
   updatedAt: v.number(),
   readyAt: v.optional(v.number()),
@@ -210,6 +211,19 @@ async function scheduleCleanup(
   });
 }
 
+async function deleteRagEntryIfPresent(
+  ctx: MutationCtx,
+  entryId: string,
+) {
+  try {
+    await knowledgeRag.deleteAsync(ctx, { entryId: entryId as EntryId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/entry .* not found/i.test(message)) return;
+    throw error;
+  }
+}
+
 async function startCleanup(
   ctx: MutationCtx,
   document: Doc<"knowledgeDocuments">,
@@ -232,9 +246,7 @@ async function startCleanup(
     document.ragEntryId &&
     document.ragEntryId !== preserveRagEntryId
   ) {
-    await knowledgeRag.deleteAsync(ctx, {
-      entryId: document.ragEntryId as EntryId,
-    });
+    await deleteRagEntryIfPresent(ctx, document.ragEntryId);
   }
   await scheduleCleanup(ctx, document, cleanupToken, 0);
 }
@@ -298,22 +310,6 @@ async function registerUpload(
     );
   }
 
-  const storedFile = await ctx.db.system.get("_storage", args.storageId);
-  if (!storedFile) {
-    throw knowledgeError("UPLOAD_NOT_FOUND", "Uploaded file not found.");
-  }
-  validateKnowledgeFileSize(storedFile.size);
-  const { fileKind, mimeType } = validateKnowledgeFileType(
-    filename,
-    storedFile.contentType,
-  );
-  if (declaredMimeType !== mimeType) {
-    throw knowledgeError(
-      "CONTENT_TYPE_MISMATCH",
-      "The uploaded file content type does not match its registration metadata.",
-    );
-  }
-
   let stableKey = `document:${clientRequestId}`;
   let version = 1;
   let replacesDocumentId: Id<"knowledgeDocuments"> | undefined;
@@ -336,14 +332,11 @@ async function registerUpload(
       )
       .order("desc")
       .take(25);
-    const activeReplacement = versions.find(
-      (document) =>
-        document.status === "queued" ||
-        document.status === "processing" ||
-        document.status === "replacing",
-    );
     const currentReady = versions.find((document) => document.status === "ready");
-    if (activeReplacement || currentReady?._id !== replacing._id) {
+    if (
+      versions[0]?._id !== replacing._id ||
+      currentReady?._id !== replacing._id
+    ) {
       throw knowledgeError(
         "DOCUMENT_NOT_REPLACEABLE",
         "A newer replacement already exists for this document.",
@@ -352,6 +345,22 @@ async function registerUpload(
     stableKey = replacing.stableKey;
     version = (versions[0]?.version ?? replacing.version) + 1;
     replacesDocumentId = replacing._id;
+  }
+
+  const storedFile = await ctx.db.system.get("_storage", args.storageId);
+  if (!storedFile) {
+    throw knowledgeError("UPLOAD_NOT_FOUND", "Uploaded file not found.");
+  }
+  validateKnowledgeFileSize(storedFile.size);
+  const { fileKind, mimeType } = validateKnowledgeFileType(
+    filename,
+    storedFile.contentType,
+  );
+  if (declaredMimeType !== mimeType) {
+    throw knowledgeError(
+      "CONTENT_TYPE_MISMATCH",
+      "The uploaded file content type does not match its registration metadata.",
+    );
   }
 
   await consumeUploadQuota(ctx, workspace._id, storedFile.size);
@@ -404,6 +413,9 @@ export const list = query({
       ...(document.errorMessage === undefined
         ? {}
         : { errorMessage: document.errorMessage }),
+      canRetry:
+        document.status === "failed" &&
+        document.attempt < MAX_TOTAL_INGESTION_ATTEMPTS,
       createdAt: document.createdAt,
       updatedAt: document.updatedAt,
       ...(document.readyAt === undefined ? {} : { readyAt: document.readyAt }),
@@ -480,6 +492,21 @@ export const retry = mutation({
       throw knowledgeError(
         "RETRY_LIMIT_EXCEEDED",
         "This document has reached the maximum number of processing attempts.",
+      );
+    }
+    const newestVersion = await ctx.db
+      .query("knowledgeDocuments")
+      .withIndex("by_workspaceId_and_stableKey_and_version", (q) =>
+        q
+          .eq("workspaceId", workspace._id)
+          .eq("stableKey", document.stableKey),
+      )
+      .order("desc")
+      .first();
+    if (newestVersion?._id !== document._id) {
+      throw knowledgeError(
+        "DOCUMENT_NOT_RETRYABLE",
+        "A newer version already exists for this document.",
       );
     }
     const retryLimit = await knowledgeRateLimiter.limit(
@@ -712,12 +739,15 @@ async function commitReadyEntry(
   processingTokenValue: string,
   ragEntryId: string,
   replacedRagEntryId: string | null,
+  deleteEntryOnStale: boolean,
 ) {
   if (
     document.status !== "processing" ||
     document.processingToken !== processingTokenValue
   ) {
-    await knowledgeRag.deleteAsync(ctx, { entryId: ragEntryId as EntryId });
+    if (deleteEntryOnStale) {
+      await deleteRagEntryIfPresent(ctx, ragEntryId);
+    }
     return;
   }
 
@@ -748,9 +778,7 @@ async function commitReadyEntry(
     replacedRagEntryId !== ragEntryId &&
     replacedRagEntryId !== replacedDocument?.ragEntryId
   ) {
-    await knowledgeRag.deleteAsync(ctx, {
-      entryId: replacedRagEntryId as EntryId,
-    });
+    await deleteRagEntryIfPresent(ctx, replacedRagEntryId);
   }
 }
 
@@ -765,9 +793,6 @@ export const completeExistingEntry = internalMutation({
   handler: async (ctx, args) => {
     const document = await ctx.db.get("knowledgeDocuments", args.documentId);
     if (!document) {
-      await knowledgeRag.deleteAsync(ctx, {
-        entryId: args.ragEntryId as EntryId,
-      });
       return null;
     }
     await commitReadyEntry(
@@ -776,6 +801,7 @@ export const completeExistingEntry = internalMutation({
       args.processingToken,
       args.ragEntryId,
       args.replacedRagEntryId,
+      false,
     );
     return null;
   },
@@ -791,12 +817,12 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
         )
       : null;
     if (!metadata || !documentId) {
-      await knowledgeRag.deleteAsync(ctx, { entryId: args.entry.entryId });
+      await deleteRagEntryIfPresent(ctx, args.entry.entryId);
       return;
     }
     const document = await ctx.db.get("knowledgeDocuments", documentId);
     if (!document) {
-      await knowledgeRag.deleteAsync(ctx, { entryId: args.entry.entryId });
+      await deleteRagEntryIfPresent(ctx, args.entry.entryId);
       return;
     }
     const metadataIsValid =
@@ -806,7 +832,7 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
       args.namespace.namespace === knowledgeNamespace(document.workspaceId) &&
       metadata.processingToken === document.processingToken;
     if (!metadataIsValid) {
-      await knowledgeRag.deleteAsync(ctx, { entryId: args.entry.entryId });
+      await deleteRagEntryIfPresent(ctx, args.entry.entryId);
       await failProcessing(ctx, document, {
         processingToken: metadata.processingToken,
         errorCode: "INGESTION_STATE_MISMATCH",
@@ -816,12 +842,12 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
       return;
     }
     if (document.status === "deleting") {
-      await knowledgeRag.deleteAsync(ctx, { entryId: args.entry.entryId });
+      await deleteRagEntryIfPresent(ctx, args.entry.entryId);
       await ensureCleanupScheduled(ctx, document);
       return;
     }
     if (args.error) {
-      await knowledgeRag.deleteAsync(ctx, { entryId: args.entry.entryId });
+      await deleteRagEntryIfPresent(ctx, args.entry.entryId);
       await failProcessing(ctx, document, {
         processingToken: metadata.processingToken,
         errorCode: "EMBEDDING_FAILED",
@@ -831,7 +857,7 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
       return;
     }
     if (args.entry.status !== "ready") {
-      await knowledgeRag.deleteAsync(ctx, { entryId: args.entry.entryId });
+      await deleteRagEntryIfPresent(ctx, args.entry.entryId);
       await failProcessing(ctx, document, {
         processingToken: metadata.processingToken,
         errorCode: "INGESTION_SUPERSEDED",
@@ -846,6 +872,7 @@ export const ragOnComplete = knowledgeRag.defineOnComplete<DataModel>(
       metadata.processingToken,
       args.entry.entryId,
       args.replacedEntry?.entryId ?? null,
+      true,
     );
   },
 );

@@ -232,7 +232,11 @@ function DocumentRow({
   onConfirmDelete: (documentId: KnowledgeDocumentId) => void;
   uploadBusy: boolean;
 }) {
-  const backendBusy = statusDetails[document.status].busy;
+  const cleanupExhausted =
+    document.status === "deleting" &&
+    document.errorCode === "STORAGE_CLEANUP_RETRY_EXHAUSTED";
+  const backendBusy =
+    statusDetails[document.status].busy && !cleanupExhausted;
   const busy = backendBusy || pendingAction !== undefined || uploadBusy;
 
   return (
@@ -256,9 +260,15 @@ function DocumentRow({
         <ItemDescription className="line-clamp-none break-all">
           {document.filename}
         </ItemDescription>
-        {document.status === "failed" && document.errorMessage ? (
+        {(document.status === "failed" || cleanupExhausted) &&
+        document.errorMessage ? (
           <p className="mt-1 text-sm text-destructive" role="alert">
             {document.errorMessage}
+          </p>
+        ) : null}
+        {document.status === "failed" && !document.canRetry ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Retry limit reached. Replace or delete this source to continue.
           </p>
         ) : null}
       </ItemContent>
@@ -308,7 +318,7 @@ function DocumentRow({
           </>
         ) : (
           <>
-            {document.status === "failed" ? (
+            {document.canRetry ? (
               <Button
                 type="button"
                 variant="outline"
@@ -322,6 +332,22 @@ function DocumentRow({
                   <RefreshCwIcon data-icon="inline-start" />
                 )}
                 Retry
+              </Button>
+            ) : null}
+            {cleanupExhausted ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={pendingAction !== undefined || uploadBusy}
+                onClick={() => onConfirmDelete(document._id)}
+              >
+                {pendingAction === "deleting" ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <RefreshCwIcon data-icon="inline-start" />
+                )}
+                Retry cleanup
               </Button>
             ) : null}
             {document.status === "ready" ? (
@@ -340,16 +366,18 @@ function DocumentRow({
                 Replace
               </Button>
             ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              disabled={busy}
-              aria-label={`Delete ${document.title}`}
-              onClick={() => onRequestDelete(document._id)}
-            >
-              {pendingAction === "deleting" ? <Spinner /> : <Trash2Icon />}
-            </Button>
+            {!cleanupExhausted ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={busy}
+                aria-label={`Delete ${document.title}`}
+                onClick={() => onRequestDelete(document._id)}
+              >
+                {pendingAction === "deleting" ? <Spinner /> : <Trash2Icon />}
+              </Button>
+            ) : null}
           </>
         )}
       </ItemActions>

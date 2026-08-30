@@ -58,6 +58,24 @@ const remove = makeFunctionReference<
   null
 >("knowledge:remove");
 
+const replace = makeFunctionReference<
+  "mutation",
+  {
+    documentId: KnowledgeDocumentId;
+    storageId: StorageId;
+    filename: string;
+    mimeType: string;
+    clientRequestId: string;
+  },
+  { documentId: KnowledgeDocumentId }
+>("knowledge:replace");
+
+const retry = makeFunctionReference<
+  "mutation",
+  { documentId: KnowledgeDocumentId },
+  null
+>("knowledge:retry");
+
 const beginProcessing = makeFunctionReference<
   "mutation",
   { documentId: KnowledgeDocumentId },
@@ -314,6 +332,7 @@ describe("knowledge registration", () => {
     ]);
     expect(Object.keys(documents[0] ?? {}).sort()).toEqual([
       "_id",
+      "canRetry",
       "createdAt",
       "fileKind",
       "filename",
@@ -472,6 +491,80 @@ describe("knowledge registration", () => {
         (await ctx.db.get("knowledgeDocuments", oldDocumentId))?.status,
       ),
     ).toBe("deleting");
+  });
+
+  test("keeps one replacement lineage until a failed version is retried or deleted", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA);
+    const readyStorageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["ready"], { type: "text/plain" })),
+    );
+    const failedStorageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["failed"], { type: "text/plain" })),
+    );
+    const nextStorageId = await t.run(async (ctx) =>
+      ctx.storage.store(new Blob(["next"], { type: "text/plain" })),
+    );
+    const now = Date.now();
+    const { readyId, failedId } = await t.run(async (ctx) => {
+      const readyId = await ctx.db.insert("knowledgeDocuments", {
+        workspaceId,
+        storageId: readyStorageId,
+        clientRequestId: "fe45c955-d7a1-4fe0-af83-b8eb362fe112",
+        stableKey: "document:lineage",
+        version: 1,
+        filename: "guide.txt",
+        title: "Guide",
+        mimeType: "text/plain",
+        fileKind: "text",
+        size: 5,
+        sha256: "ready",
+        status: "ready",
+        ragEntryId: "rag:ready",
+        attempt: 1,
+        createdAt: now - 1,
+        updatedAt: now - 1,
+        readyAt: now - 1,
+      });
+      const failedId = await ctx.db.insert("knowledgeDocuments", {
+        workspaceId,
+        storageId: failedStorageId,
+        clientRequestId: "18421dd1-dc2e-4426-88a7-786bb8c87e7d",
+        stableKey: "document:lineage",
+        version: 2,
+        replacesDocumentId: readyId,
+        filename: "guide.txt",
+        title: "Guide",
+        mimeType: "text/plain",
+        fileKind: "text",
+        size: 6,
+        sha256: "failed",
+        status: "failed",
+        attempt: 1,
+        errorCode: "EMBEDDING_FAILED",
+        errorMessage: "Retry this version.",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { readyId, failedId };
+    });
+
+    await expect(
+      t.withIdentity(ownerA).mutation(replace, {
+        documentId: readyId,
+        storageId: nextStorageId,
+        filename: "guide.txt",
+        mimeType: "text/plain",
+        clientRequestId: "94797f93-f503-4164-b5ee-013408b1b050",
+      }),
+    ).rejects.toThrow("newer replacement already exists");
+
+    await expect(
+      t.withIdentity(ownerA).mutation(retry, { documentId: failedId }),
+    ).resolves.toBeNull();
+    expect(
+      await t.run(async (ctx) => ctx.db.get("knowledgeDocuments", failedId)),
+    ).toMatchObject({ status: "replacing" });
   });
 });
 

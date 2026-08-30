@@ -1,3 +1,5 @@
+"use node";
+
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import {
   decodeUtf8Document,
