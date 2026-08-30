@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as aiModel from "../aiModel.js";
 import type * as auth from "../auth.js";
 import type * as chatModel from "../chatModel.js";
 import type * as chatOwner from "../chatOwner.js";
@@ -15,6 +16,13 @@ import type * as chatValidators from "../chatValidators.js";
 import type * as health from "../health.js";
 import type * as http from "../http.js";
 import type * as inbox from "../inbox.js";
+import type * as knowledge from "../knowledge.js";
+import type * as knowledgeCleanup from "../knowledgeCleanup.js";
+import type * as knowledgeExtract from "../knowledgeExtract.js";
+import type * as knowledgeInternal from "../knowledgeInternal.js";
+import type * as knowledgeModel from "../knowledgeModel.js";
+import type * as knowledgeNode from "../knowledgeNode.js";
+import type * as knowledgeRag from "../knowledgeRag.js";
 import type * as typingPresence from "../typingPresence.js";
 import type * as widgetChat from "../widgetChat.js";
 import type * as widgetChatInternal from "../widgetChatInternal.js";
@@ -29,6 +37,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  aiModel: typeof aiModel;
   auth: typeof auth;
   chatModel: typeof chatModel;
   chatOwner: typeof chatOwner;
@@ -36,6 +45,13 @@ declare const fullApi: ApiFromModules<{
   health: typeof health;
   http: typeof http;
   inbox: typeof inbox;
+  knowledge: typeof knowledge;
+  knowledgeCleanup: typeof knowledgeCleanup;
+  knowledgeExtract: typeof knowledgeExtract;
+  knowledgeInternal: typeof knowledgeInternal;
+  knowledgeModel: typeof knowledgeModel;
+  knowledgeNode: typeof knowledgeNode;
+  knowledgeRag: typeof knowledgeRag;
   typingPresence: typeof typingPresence;
   widgetChat: typeof widgetChat;
   widgetChatInternal: typeof widgetChatInternal;

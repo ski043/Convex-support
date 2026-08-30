@@ -2,7 +2,12 @@
 
 import { usePreloadedAuthQuery } from "@convex-dev/better-auth/nextjs/client";
 import type { Preloaded } from "convex/react";
-import { InboxIcon, LogOutIcon, MessageSquareTextIcon } from "lucide-react";
+import {
+  BookOpenTextIcon,
+  InboxIcon,
+  LogOutIcon,
+  MessageSquareTextIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
@@ -50,6 +55,11 @@ const navItems = [
     title: "Inbox",
     href: "/dashboard/inbox",
     icon: InboxIcon,
+  },
+  {
+    title: "Knowledge",
+    href: "/dashboard/knowledge",
+    icon: BookOpenTextIcon,
   },
 ] as const;
 
