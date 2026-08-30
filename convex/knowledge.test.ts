@@ -701,22 +701,32 @@ describe("knowledge registration", () => {
 });
 
 describe("knowledge recovery", () => {
-  test("deletes only claimed knowledge orphans after the grace window", async () => {
+  test("deletes unclaimed post-activation uploads without touching older storage", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-08-01T00:00:00Z"));
       const t = backend();
       const workspaceId = await createWorkspace(t, ownerA);
+      const preexistingStorageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["preexisting"])),
+      );
+      vi.advanceTimersByTime(1);
+      const now = Date.now();
+      await t.run(async (ctx) =>
+        ctx.db.insert("knowledgeStorageSweepState", {
+          name: "knowledgeUploads",
+          activatedAt: now,
+        }),
+      );
       const registeredStorageId = await t.run(async (ctx) =>
         ctx.storage.store(new Blob(["registered"])),
       );
-      const orphanStorageId = await t.run(async (ctx) =>
-        ctx.storage.store(new Blob(["abandoned"])),
+      const claimedOrphanStorageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["claimed abandoned"])),
       );
-      const unrelatedStorageId = await t.run(async (ctx) =>
-        ctx.storage.store(new Blob(["unrelated"])),
+      const unclaimedOrphanStorageId = await t.run(async (ctx) =>
+        ctx.storage.store(new Blob(["unclaimed abandoned"])),
       );
-      const now = Date.now();
       await t.run(async (ctx) => {
         await ctx.db.insert("knowledgeDocuments", {
           workspaceId,
@@ -744,7 +754,12 @@ describe("knowledge recovery", () => {
         await ctx.db.insert("knowledgeUploadReservations", {
           workspaceId,
           token: "abandoned-upload",
-          storageId: orphanStorageId,
+          storageId: claimedOrphanStorageId,
+          createdAt: now,
+        });
+        await ctx.db.insert("knowledgeUploadReservations", {
+          workspaceId,
+          token: "unclaimed-upload",
           createdAt: now,
         });
       });
@@ -759,12 +774,17 @@ describe("knowledge recovery", () => {
       ).not.toBeNull();
       expect(
         await t.run(async (ctx) =>
-          ctx.db.system.get("_storage", orphanStorageId),
+          ctx.db.system.get("_storage", claimedOrphanStorageId),
         ),
       ).toBeNull();
       expect(
         await t.run(async (ctx) =>
-          ctx.db.system.get("_storage", unrelatedStorageId),
+          ctx.db.system.get("_storage", unclaimedOrphanStorageId),
+        ),
+      ).toBeNull();
+      expect(
+        await t.run(async (ctx) =>
+          ctx.db.system.get("_storage", preexistingStorageId),
         ),
       ).not.toBeNull();
       expect(

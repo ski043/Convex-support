@@ -502,6 +502,7 @@ export const generateUploadUrl = mutation({
   returns: uploadUrlResultValidator,
   handler: async (ctx) => {
     const workspace = await requireOwnerWorkspace(ctx);
+    const now = Date.now();
     const issuanceLimit = await knowledgeRateLimiter.limit(
       ctx,
       "knowledgeUploadUrl",
@@ -527,11 +528,21 @@ export const generateUploadUrl = mutation({
         "The daily knowledge upload byte limit has been reached.",
       );
     }
+    const sweepState = await ctx.db
+      .query("knowledgeStorageSweepState")
+      .withIndex("by_name", (q) => q.eq("name", "knowledgeUploads"))
+      .unique();
+    if (!sweepState) {
+      await ctx.db.insert("knowledgeStorageSweepState", {
+        name: "knowledgeUploads",
+        activatedAt: now,
+      });
+    }
     const reservationToken = processingToken();
     await ctx.db.insert("knowledgeUploadReservations", {
       workspaceId: workspace._id,
       token: reservationToken,
-      createdAt: Date.now(),
+      createdAt: now,
     });
     return {
       uploadUrl: await ctx.storage.generateUploadUrl(),
