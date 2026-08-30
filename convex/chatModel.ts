@@ -332,6 +332,11 @@ export function toVisitorSnapshot(visitor: Doc<"visitors">) {
 export function toConversationItem(
   conversation: Doc<"conversations">,
   visitor: Doc<"visitors">,
+  automation?: {
+    mode: Doc<"aiConversationStates">["mode"];
+    attention: Doc<"aiConversationStates">["attention"];
+    isAiTyping: boolean;
+  },
 ) {
   if (
     !conversation.hasMessages ||
@@ -341,6 +346,17 @@ export function toConversationItem(
   ) {
     throw chatError("CONVERSATION_NOT_FOUND", "Conversation not found.");
   }
+
+  const mode = automation?.mode ?? "human";
+  const attention = automation?.attention ?? "none";
+  const handlingState =
+    conversation.status === "resolved"
+      ? ("resolved" as const)
+      : attention === "needs_human"
+        ? ("needs_human" as const)
+        : mode === "ai"
+          ? ("ai_handling" as const)
+          : ("human_handling" as const);
 
   return {
     _id: conversation._id,
@@ -354,6 +370,11 @@ export function toConversationItem(
       createdAt: conversation.lastMessageAt,
     },
     unreadCount: conversation.unreadCount,
+    handlingState,
+    attentionState: attention,
+    isAiTyping: automation?.isAiTyping ?? false,
+    canTakeOver: conversation.status === "open" && mode === "ai",
+    canResume: conversation.status === "open" && mode !== "ai",
     visitor: toVisitorSnapshot(visitor),
   };
 }
