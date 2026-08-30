@@ -317,10 +317,32 @@ describe("widget bootstrap request parsing", () => {
 });
 
 describe("visitor sessions and isolation", () => {
-  test("bootstrap renewal is limited to a live capability's bound origin", async () => {
+  test("bootstrap renewal accepts legacy visitors without weakening origin policy", async () => {
     const t = makeTestBackend();
     const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
     const session = await createVisitor(t, workspaceId);
+
+    await t.run(async (ctx) => {
+      const visitor = await ctx.db
+        .query("visitors")
+        .withIndex("by_workspaceId_and_capabilityToken", (q) =>
+          q.eq("workspaceId", workspaceId).eq("capabilityToken", session.token),
+        )
+        .unique();
+      if (!visitor) throw new Error("Expected visitor");
+      await ctx.db.patch("visitors", visitor._id, { origin: undefined });
+      await ctx.db.insert("widgetSettings", {
+        ownerTokenIdentifier: ownerAIdentity.tokenIdentifier,
+        workspaceId,
+        displayName: "Support",
+        greeting: "Hello",
+        theme: "blue",
+        position: "bottomRight",
+        allowedOrigins: [TEST_WIDGET_ORIGIN],
+        originPolicy: "enforced",
+        updatedAt: Date.now(),
+      });
+    });
 
     await expect(
       t.mutation(getBootstrapRenewalPolicy, {
@@ -328,7 +350,7 @@ describe("visitor sessions and isolation", () => {
         capabilityToken: session.token,
         origin: TEST_WIDGET_ORIGIN,
       }),
-    ).resolves.toMatchObject({ allowed: true, mode: "legacy_limited" });
+    ).resolves.toMatchObject({ allowed: true, mode: "enforced" });
     await expect(
       t.mutation(getBootstrapRenewalPolicy, {
         workspaceId,

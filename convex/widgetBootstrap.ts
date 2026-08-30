@@ -79,7 +79,7 @@ export const getRenewalPolicy = mutation({
       !visitor ||
       visitor.capabilityExpired ||
       visitor.capabilityExpiresAt <= now ||
-      visitor.origin !== origin
+      (visitor.origin !== undefined && visitor.origin !== origin)
     ) {
       return null;
     }
