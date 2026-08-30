@@ -1,7 +1,37 @@
+import { ConvexError } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 
 export const MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE = 100;
+const MAX_WIDGET_ORIGIN_OVERFLOW_REPAIRS_PER_WRITE = 100;
+const MAX_WIDGET_ORIGIN_CLEAR_ROWS_PER_MUTATION = 1_000;
+
+async function repairWidgetOriginObservationOverflow(
+  ctx: MutationCtx,
+  workspaceId: Id<"workspaces">,
+  slotsNeeded: 0 | 1,
+) {
+  const oldestWindow = await ctx.db
+    .query("widgetOriginObservations")
+    .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+      q.eq("workspaceId", workspaceId),
+    )
+    .order("asc")
+    .take(
+      MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE +
+        MAX_WIDGET_ORIGIN_OVERFLOW_REPAIRS_PER_WRITE,
+    );
+  const retainedBeforeWrite =
+    MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE - slotsNeeded;
+  const overflow = Math.max(0, oldestWindow.length - retainedBeforeWrite);
+  await Promise.all(
+    oldestWindow
+      .slice(0, overflow)
+      .map((observation) =>
+        ctx.db.delete("widgetOriginObservations", observation._id),
+      ),
+  );
+}
 
 export async function recordWidgetOriginObservation(
   ctx: MutationCtx,
@@ -25,22 +55,11 @@ export async function recordWidgetOriginObservation(
       sessionCount: existing.sessionCount + 1,
       lastSeenAt: now,
     });
+    await repairWidgetOriginObservationOverflow(ctx, workspaceId, 0);
     return;
   }
 
-  const retained = await ctx.db
-    .query("widgetOriginObservations")
-    .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
-      q.eq("workspaceId", workspaceId),
-    )
-    .order("desc")
-    .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
-  if (retained.length >= MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE) {
-    const oldest = retained.at(-1);
-    if (oldest) {
-      await ctx.db.delete("widgetOriginObservations", oldest._id);
-    }
-  }
+  await repairWidgetOriginObservationOverflow(ctx, workspaceId, 1);
 
   await ctx.db.insert("widgetOriginObservations", {
     workspaceId,
@@ -62,7 +81,12 @@ export async function clearWidgetOriginObservations(
     .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
       q.eq("workspaceId", workspaceId),
     )
-    .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
+    .take(MAX_WIDGET_ORIGIN_CLEAR_ROWS_PER_MUTATION + 1);
+  if (observations.length > MAX_WIDGET_ORIGIN_CLEAR_ROWS_PER_MUTATION) {
+    throw new ConvexError(
+      "Origin discovery history is too large to clear safely in one request. Run the widget normally to repair the history, then try again.",
+    );
+  }
   await Promise.all(
     observations.map((observation) =>
       ctx.db.delete("widgetOriginObservations", observation._id),

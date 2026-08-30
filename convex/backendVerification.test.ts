@@ -1056,22 +1056,29 @@ describe("widget origin enforcement guidance", () => {
     expect(result.origins.at(-1)?.origin).toBe("https://site-1.example.com");
   });
 
-  test("origin observations are bounded and can be cleared for rediscovery", async () => {
+  test("origin observations repair legacy overflow and clear for rediscovery", async () => {
     const t = backend();
     const workspaceId = await createWorkspace(t, ownerA, "widget-origin-cap");
     await t.run(async (ctx) => {
       for (
         let index = 0;
-        index < MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 1;
+        index < MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25;
         index += 1
       ) {
-        await recordWidgetOriginObservation(
-          ctx,
+        await ctx.db.insert("widgetOriginObservations", {
           workspaceId,
-          `https://bounded-${index}.example.com`,
-          index,
-        );
+          origin: `https://bounded-${index}.example.com`,
+          sessionCount: 1,
+          firstSeenAt: index,
+          lastSeenAt: index,
+        });
       }
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
+        `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25}.example.com`,
+        MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25,
+      );
     });
 
     expect(
@@ -1095,12 +1102,21 @@ describe("widget origin enforcement guidance", () => {
       "https://bounded-0.example.com",
     );
     expect(retained.map((observation) => observation.origin)).toContain(
-      `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE}.example.com`,
+      `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25}.example.com`,
     );
 
-    await t.run(async (ctx) =>
-      clearWidgetOriginObservations(ctx, workspaceId),
-    );
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 25; index += 1) {
+        await ctx.db.insert("widgetOriginObservations", {
+          workspaceId,
+          origin: `https://legacy-overflow-${index}.example.com`,
+          sessionCount: 1,
+          firstSeenAt: index,
+          lastSeenAt: index,
+        });
+      }
+      await clearWidgetOriginObservations(ctx, workspaceId);
+    });
     expect(
       await t.run(async (ctx) =>
         ctx.db
