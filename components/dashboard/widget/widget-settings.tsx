@@ -220,6 +220,7 @@ function OriginSecuritySettings({
     originsKey: string;
     policy: OriginPolicy;
   } | null>(null);
+  const securityWriteInFlight = useRef(false);
   const editRevision = useRef(0);
   const visibleSaveStatus =
     saveStatus === "saved" &&
@@ -341,7 +342,8 @@ function OriginSecuritySettings({
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (saveStatus === "saving") return;
+    if (securityWriteInFlight.current) return;
+    securityWriteInFlight.current = true;
 
     const submittedRevision = editRevision.current;
     const submittedOrigins = origins.map((origin) => ({ ...origin }));
@@ -394,16 +396,22 @@ function OriginSecuritySettings({
       if (pendingServerSecurity.current === submittedSecurity) {
         pendingServerSecurity.current = null;
       }
+      securityWriteInFlight.current = false;
     }
   }
 
   async function handleRestartSecuritySetup() {
-    if (restartStep === "saving") return;
+    if (securityWriteInFlight.current) return;
+    securityWriteInFlight.current = true;
     setRestartStep("saving");
     setRestartError(null);
 
     try {
       await restartSecuritySetup({});
+      lastServerSecurity.current = {
+        ...lastServerSecurity.current,
+        policy: "legacy_limited",
+      };
       setPolicy("legacy_limited");
       setRestartStep("idle");
       setSaveStatus("idle");
@@ -416,6 +424,8 @@ function OriginSecuritySettings({
           "We couldn’t restart origin discovery. Enforcement is still active.",
         ),
       );
+    } finally {
+      securityWriteInFlight.current = false;
     }
   }
 
@@ -561,6 +571,7 @@ function OriginSecuritySettings({
                   variant="outline"
                   size="sm"
                   className="mt-3"
+                  disabled={visibleSaveStatus === "saving"}
                   onClick={() => {
                     setRestartStep("confirming");
                     setRestartError(null);
@@ -585,7 +596,10 @@ function OriginSecuritySettings({
                       type="button"
                       variant="destructive"
                       size="sm"
-                      disabled={restartStep === "saving"}
+                      disabled={
+                        restartStep === "saving" ||
+                        visibleSaveStatus === "saving"
+                      }
                       onClick={() => void handleRestartSecuritySetup()}
                     >
                       {restartStep === "saving" ? (
@@ -647,7 +661,9 @@ function OriginSecuritySettings({
               <Button
                 type="submit"
                 className="h-10 sm:h-8"
-                disabled={visibleSaveStatus === "saving"}
+                disabled={
+                  visibleSaveStatus === "saving" || restartStep === "saving"
+                }
               >
                 {visibleSaveStatus === "saving" ? (
                   <Spinner data-icon="inline-start" />
