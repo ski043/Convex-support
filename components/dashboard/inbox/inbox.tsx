@@ -50,16 +50,26 @@ function ConversationLoadingSkeleton() {
   );
 }
 
-function EmptyInbox() {
+function EmptyInbox({
+  attentionFilter,
+}: {
+  attentionFilter: "all" | "needs_human";
+}) {
   return (
     <Empty className="h-full min-h-80">
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <InboxIcon />
         </EmptyMedia>
-        <EmptyTitle>No conversations yet</EmptyTitle>
+        <EmptyTitle>
+          {attentionFilter === "needs_human"
+            ? "No conversations need a human"
+            : "No conversations yet"}
+        </EmptyTitle>
         <EmptyDescription>
-          When a visitor sends a message from your widget, it will appear here.
+          {attentionFilter === "needs_human"
+            ? "AI has not handed off any active conversations."
+            : "When a visitor sends a message from your widget, it will appear here."}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
@@ -67,12 +77,17 @@ function EmptyInbox() {
 }
 
 export function Inbox() {
+  const [attentionFilter, setAttentionFilter] = useState<
+    "all" | "needs_human"
+  >("all");
   const {
     results: conversations,
     status: conversationStatus,
     loadMore: loadMoreConversations,
   } = usePaginatedQuery(
-    api.inbox.listConversations,
+    attentionFilter === "needs_human"
+      ? api.inbox.listNeedsHuman
+      : api.inbox.listConversations,
     {},
     { initialNumItems: 50 },
   );
@@ -183,6 +198,20 @@ export function Inbox() {
         ? current
         : { conversationId: id, pending: false, error: null },
     );
+  }
+
+  function changeAttentionFilter(value: "all" | "needs_human") {
+    if (value === attentionFilter) return;
+    activeConversationId.current = null;
+    setAttentionFilter(value);
+    setSelectedId(null);
+    setDraft("");
+    setMobileThreadOpen(false);
+    setQuery("");
+    replyAttempt.current = null;
+    resolveAttempt.current = null;
+    setReplyState({ conversationId: null, pending: false, error: null });
+    setResolveState({ conversationId: null, pending: false, error: null });
   }
 
   function changeDraft(value: string) {
@@ -297,9 +326,11 @@ export function Inbox() {
       query={query}
       now={now}
       paginationStatus={conversationStatus}
+      attentionFilter={attentionFilter}
       onQueryChange={setQuery}
       onSelect={selectConversation}
       onLoadMore={() => loadMoreConversations(50)}
+      onAttentionFilterChange={changeAttentionFilter}
     />
   );
 
@@ -330,7 +361,7 @@ export function Inbox() {
     ) : conversationStatus === "LoadingFirstPage" ? (
       <ConversationLoadingSkeleton />
     ) : (
-      <EmptyInbox />
+      <EmptyInbox attentionFilter={attentionFilter} />
     );
 
   return (

@@ -12,6 +12,12 @@ import type { GroundedAnswerSegment, RetrievedEvidence } from "./aiModel";
 import { knowledgeNamespace } from "./knowledgeModel";
 import schema from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
+import { getRecentWidgetOriginObservations } from "./widgetSettings";
+import {
+  clearWidgetOriginObservations,
+  MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE,
+  recordWidgetOriginObservation,
+} from "./widgetOriginModel";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -172,6 +178,16 @@ const getWidgetAutomationState = makeFunctionReference<
   { workspaceId: WorkspaceId; token: string },
   { isAiTyping: boolean; handling: "ai" | "human"; needsHuman: boolean }
 >("widgetChat:getAutomationState");
+
+const continueClearWidgetOriginObservations = makeFunctionReference<
+  "mutation",
+  {
+    workspaceId: WorkspaceId;
+    clearThroughLastSeenAt: number;
+    clearThroughCreationTime: number;
+  },
+  null
+>("widgetSettings:continueClearWidgetOriginObservations");
 
 const removeKnowledge = makeFunctionReference<
   "mutation",
@@ -974,5 +990,184 @@ describe("widget bootstrap policy versioning", () => {
         ),
       ).toMatchObject({ allowed: true, policyVersion: 50 });
     });
+  });
+});
+
+describe("widget origin enforcement guidance", () => {
+  test("browser-reported origins preserve activity and recency signals", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-origins");
+    await t.run(async (ctx) => {
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
+        "https://shop.example.com",
+        1_000,
+      );
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
+        "https://help.example.com",
+        2_000,
+      );
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
+        "https://shop.example.com",
+        3_000,
+      );
+    });
+
+    expect(
+      await t.run(async (ctx) =>
+        getRecentWidgetOriginObservations(ctx, workspaceId),
+      ),
+    ).toEqual({
+      origins: [
+        {
+          origin: "https://shop.example.com",
+          sessionCount: 2,
+          firstSeenAt: 1_000,
+          lastSeenAt: 3_000,
+        },
+        {
+          origin: "https://help.example.com",
+          sessionCount: 1,
+          firstSeenAt: 2_000,
+          lastSeenAt: 2_000,
+        },
+      ],
+      isTruncated: false,
+      isAtCapacity: false,
+    });
+  });
+
+  test("origin guidance identifies a list that exceeds the enforceable sample", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-origin-limit");
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 21; index += 1) {
+        await recordWidgetOriginObservation(
+          ctx,
+          workspaceId,
+          `https://site-${index}.example.com`,
+          index,
+        );
+      }
+    });
+
+    const result = await t.run(async (ctx) =>
+      getRecentWidgetOriginObservations(ctx, workspaceId),
+    );
+    expect(result.isTruncated).toBe(true);
+    expect(result.isAtCapacity).toBe(false);
+    expect(result.origins).toHaveLength(20);
+    expect(result.origins[0]?.origin).toBe("https://site-20.example.com");
+    expect(result.origins.at(-1)?.origin).toBe("https://site-1.example.com");
+  });
+
+  test("origin observations repair legacy overflow and clear for rediscovery", async () => {
+    const t = backend();
+    const workspaceId = await createWorkspace(t, ownerA, "widget-origin-cap");
+    await t.run(async (ctx) => {
+      for (
+        let index = 0;
+        index < MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25;
+        index += 1
+      ) {
+        await ctx.db.insert("widgetOriginObservations", {
+          workspaceId,
+          origin: `https://bounded-${index}.example.com`,
+          sessionCount: 1,
+          firstSeenAt: index,
+          lastSeenAt: index,
+        });
+      }
+      await recordWidgetOriginObservation(
+        ctx,
+        workspaceId,
+        `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25}.example.com`,
+        MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25,
+      );
+    });
+
+    expect(
+      (
+        await t.run(async (ctx) =>
+          getRecentWidgetOriginObservations(ctx, workspaceId),
+        )
+      ).isAtCapacity,
+    ).toBe(true);
+
+    const retained = await t.run(async (ctx) =>
+      ctx.db
+        .query("widgetOriginObservations")
+        .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+          q.eq("workspaceId", workspaceId),
+        )
+        .take(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 1),
+    );
+    expect(retained).toHaveLength(MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE);
+    expect(retained.map((observation) => observation.origin)).not.toContain(
+      "https://bounded-0.example.com",
+    );
+    expect(retained.map((observation) => observation.origin)).toContain(
+      `https://bounded-${MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25}.example.com`,
+    );
+
+    vi.useFakeTimers();
+    try {
+      await t.run(async (ctx) => {
+        for (
+          let index = 0;
+          index < MAX_WIDGET_ORIGIN_OBSERVATIONS_PER_WORKSPACE + 25;
+          index += 1
+        ) {
+          await ctx.db.insert("widgetOriginObservations", {
+            workspaceId,
+            origin: `https://legacy-overflow-${index}.example.com`,
+            sessionCount: 1,
+            firstSeenAt: index,
+            lastSeenAt: index,
+          });
+        }
+      });
+      const firstBatch = await t.run(async (ctx) =>
+        clearWidgetOriginObservations(ctx, workspaceId),
+      );
+      if (!firstBatch.hasMore || !firstBatch.clearThrough) {
+        throw new Error("Expected a scheduled clear continuation");
+      }
+      const clearThrough = firstBatch.clearThrough;
+      const rediscoveredOrigin = "https://rediscovered.example.com";
+      vi.advanceTimersByTime(1);
+      await t.run(async (ctx) => {
+        await ctx.db.insert("widgetOriginObservations", {
+          workspaceId,
+          origin: rediscoveredOrigin,
+          sessionCount: 1,
+          firstSeenAt: clearThrough.lastSeenAt,
+          lastSeenAt: clearThrough.lastSeenAt,
+        });
+      });
+      await t.mutation(continueClearWidgetOriginObservations, {
+        workspaceId,
+        clearThroughLastSeenAt: clearThrough.lastSeenAt,
+        clearThroughCreationTime: clearThrough.creationTime,
+      });
+      await t.finishAllScheduledFunctions(() => vi.runAllTimers());
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_lastSeenAt", (q) =>
+            q.eq("workspaceId", workspaceId),
+          )
+          .take(2),
+      ),
+    ).toMatchObject([{ origin: "https://rediscovered.example.com" }]);
   });
 });

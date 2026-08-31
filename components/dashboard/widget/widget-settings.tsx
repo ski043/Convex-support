@@ -1,12 +1,16 @@
 "use client";
 
 import { usePreloadedAuthQuery } from "@convex-dev/better-auth/nextjs/client";
-import { useMutation, type Preloaded } from "convex/react";
+import { useMutation, useQuery, type Preloaded } from "convex/react";
 import {
+  AlertTriangleIcon,
   CheckIcon,
   Code2Icon,
   CopyIcon,
+  Globe2Icon,
   MessageCircleIcon,
+  PlusIcon,
+  Trash2Icon,
 } from "lucide-react";
 import {
   useEffect,
@@ -14,8 +18,14 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type FormEvent,
 } from "react";
 import { LogoMark } from "@/components/logo";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -29,6 +39,8 @@ import {
 } from "@/components/ui/card";
 import {
   Field,
+  FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
   FieldLegend,
@@ -43,6 +55,13 @@ import {
   widgetInstallSnippet,
   widgetInstallSnippetParts,
 } from "@/lib/widget-snippet";
+import {
+  normalizeNonEmptyValues,
+  normalizedValuesEqual,
+  saveAwareServerBaseline,
+  syncUntouchedValue,
+  widgetOriginObservationWarnings,
+} from "@/lib/settings-form-model";
 import { cn } from "@/lib/utils";
 
 type WidgetTheme = "blue" | "green" | "red" | "amber" | "zinc";
@@ -54,6 +73,8 @@ type WidgetSettingsDraft = {
   position: WidgetPosition;
 };
 type SaveStatus = "idle" | "saving" | "saved" | "error";
+type OriginPolicy = "legacy_limited" | "enforced";
+type OriginDraft = { id: string; value: string };
 
 const defaultWidgetSettings: WidgetSettingsDraft = {
   displayName: "MarshalDesk support",
@@ -85,6 +106,21 @@ const panelColorValues: Record<WidgetTheme, string> = {
   amber: "#70400c",
   zinc: "#3f3f46",
 };
+
+const observationTimestampFormatter = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+
+function formatObservationTimestamp(timestamp: number) {
+  return `${observationTimestampFormatter.format(new Date(timestamp))} UTC`;
+}
+
+function formatObservationActivity(sessionCount: number) {
+  if (sessionCount === 0) return "Observed during capability resume";
+  return `${sessionCount} new session bootstrap${sessionCount === 1 ? "" : "s"}`;
+}
 
 function highlightSnippetPart(part: string, index: number) {
   if (part === "<" || part === ">" || part === "</") {
@@ -125,6 +161,529 @@ function settingsAreEqual(a: WidgetSettingsDraft, b: WidgetSettingsDraft) {
 
 function subscribeToDashboardOrigin() {
   return () => {};
+}
+
+function ownerSafeError(error: unknown, fallback: string) {
+  if (!(error instanceof Error)) return fallback;
+
+  const data = (error as Error & { data?: unknown }).data;
+  if (typeof data === "string" && data.trim()) return data.trim();
+
+  const message = /ConvexError:\s*([^\n]+)/i.exec(error.message)?.[1]?.trim();
+
+  return message || fallback;
+}
+
+function OriginSecuritySettings({
+  initialOrigins,
+  initialPolicy,
+  hasResolvedSecurity,
+}: {
+  initialOrigins: string[];
+  initialPolicy: OriginPolicy;
+  hasResolvedSecurity: boolean;
+}) {
+  const saveSecurity = useMutation(api.widgetSettings.saveSecurity);
+  const restartSecuritySetup = useMutation(
+    api.widgetSettings.restartSecuritySetup,
+  );
+  const recentOriginState = useQuery(api.widgetSettings.getRecentOrigins);
+  const recentOrigins = recentOriginState?.origins ?? [];
+  const observationWarnings = widgetOriginObservationWarnings({
+    isAtCapacity: recentOriginState?.isAtCapacity ?? false,
+    isTruncated: recentOriginState?.isTruncated ?? false,
+  });
+  const [origins, setOrigins] = useState<OriginDraft[]>(() =>
+    (initialOrigins.length > 0 ? initialOrigins : [""]).map((value, index) => ({
+      id: `origin-${index}`,
+      value,
+    })),
+  );
+  const [policy, setPolicy] = useState<OriginPolicy>(initialPolicy);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [lastSavedSecurity, setLastSavedSecurity] = useState<{
+    originsKey: string;
+    policy: OriginPolicy;
+  } | null>(null);
+  const [restartStep, setRestartStep] = useState<
+    "idle" | "confirming" | "saving" | "error"
+  >("idle");
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const nextOriginId = useRef(origins.length);
+  const serverOriginsKey = JSON.stringify(initialOrigins);
+  const lastServerSecurity = useRef({
+    originsKey: serverOriginsKey,
+    policy: initialPolicy,
+  });
+  const pendingServerSecurity = useRef<{
+    originsKey: string;
+    policy: OriginPolicy;
+  } | null>(null);
+  const securityWriteInFlight = useRef(false);
+  const editRevision = useRef(0);
+  const visibleSaveStatus =
+    saveStatus === "saved" &&
+    (!hasResolvedSecurity ||
+      lastSavedSecurity?.originsKey !== serverOriginsKey ||
+      lastSavedSecurity?.policy !== initialPolicy)
+      ? "idle"
+      : saveStatus;
+
+  function draftsForValues(current: OriginDraft[], values: string[]) {
+    const displayValues = values.length > 0 ? values : [""];
+    return displayValues.map((value) => {
+      const existing = current.find(
+        (origin) => origin.value.trim() === value,
+      );
+      if (existing) return { ...existing, value };
+
+      const id = `origin-${nextOriginId.current}`;
+      nextOriginId.current += 1;
+      return { id, value };
+    });
+  }
+
+  useEffect(() => {
+    if (!hasResolvedSecurity) return;
+
+    const previousSecurity = lastServerSecurity.current;
+    if (
+      previousSecurity.originsKey === serverOriginsKey &&
+      previousSecurity.policy === initialPolicy
+    ) {
+      return;
+    }
+
+    const pendingSecurity = pendingServerSecurity.current;
+    const previousOriginsKey = saveAwareServerBaseline(
+      previousSecurity.originsKey,
+      serverOriginsKey,
+      pendingSecurity?.originsKey,
+    );
+    const previousPolicy = saveAwareServerBaseline(
+      previousSecurity.policy,
+      initialPolicy,
+      pendingSecurity?.policy,
+    );
+    const previousOrigins = JSON.parse(previousOriginsKey) as string[];
+    const nextOrigins = JSON.parse(serverOriginsKey) as string[];
+    setOrigins((current) =>
+      normalizedValuesEqual(
+        current.map((origin) => origin.value),
+        previousOrigins,
+      )
+        ? draftsForValues(current, nextOrigins)
+        : current,
+    );
+    setPolicy((current) =>
+      syncUntouchedValue(current, previousPolicy, initialPolicy),
+    );
+    lastServerSecurity.current = {
+      originsKey: serverOriginsKey,
+      policy: initialPolicy,
+    };
+  }, [
+    hasResolvedSecurity,
+    initialPolicy,
+    serverOriginsKey,
+  ]);
+
+  function markEdited() {
+    editRevision.current += 1;
+    setSaveStatus((current) => (current === "saving" ? current : "idle"));
+    setSaveError(null);
+  }
+
+  function updateOrigin(id: string, value: string) {
+    setOrigins((current) =>
+      current.map((origin) =>
+        origin.id === id ? { ...origin, value } : origin,
+      ),
+    );
+    markEdited();
+  }
+
+  function addOrigin() {
+    const id = `origin-${nextOriginId.current}`;
+    nextOriginId.current += 1;
+    setOrigins((current) =>
+      current.length >= 20
+        ? current
+        : [...current, { id, value: "" }],
+    );
+    markEdited();
+  }
+
+  function removeOrigin(id: string) {
+    setOrigins((current) => {
+      if (current.length === 1) return [{ ...current[0], value: "" }];
+      return current.filter((origin) => origin.id !== id);
+    });
+    markEdited();
+  }
+
+  function addRecentOrigin(value: string) {
+    const id = `origin-${nextOriginId.current}`;
+    nextOriginId.current += 1;
+    setOrigins((current) => {
+      if (current.some((origin) => origin.value.trim() === value)) return current;
+      const emptyIndex = current.findIndex((origin) => !origin.value.trim());
+      if (emptyIndex >= 0) {
+        return current.map((origin, index) =>
+          index === emptyIndex ? { ...origin, value } : origin,
+        );
+      }
+      if (current.length >= 20) return current;
+      return [...current, { id, value }];
+    });
+    markEdited();
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (securityWriteInFlight.current) return;
+    securityWriteInFlight.current = true;
+
+    const submittedRevision = editRevision.current;
+    const submittedOrigins = origins.map((origin) => ({ ...origin }));
+    const allowedOrigins = normalizeNonEmptyValues(
+      submittedOrigins.map((origin) => origin.value),
+    );
+    const submittedSecurity = {
+      originsKey: JSON.stringify(allowedOrigins),
+      policy: "enforced" as const,
+    };
+    pendingServerSecurity.current = submittedSecurity;
+    setSaveStatus("saving");
+    setSaveError(null);
+
+    try {
+      await saveSecurity({
+        allowedOrigins,
+      });
+      lastServerSecurity.current = submittedSecurity;
+      setLastSavedSecurity(submittedSecurity);
+      setOrigins((current) =>
+        current.length === submittedOrigins.length &&
+        current.every(
+          (origin, index) =>
+            origin.id === submittedOrigins[index]?.id &&
+            origin.value === submittedOrigins[index]?.value,
+        )
+          ? draftsForValues(current, allowedOrigins)
+          : current,
+      );
+      setPolicy((current) =>
+        current === policy ? submittedSecurity.policy : current,
+      );
+      setSaveStatus(
+        editRevision.current === submittedRevision ? "saved" : "idle",
+      );
+    } catch (error) {
+      if (editRevision.current === submittedRevision) {
+        setSaveStatus("error");
+        setSaveError(
+          ownerSafeError(
+            error,
+            "We couldn’t save these origins. Check each exact origin and try again.",
+          ),
+        );
+      } else {
+        setSaveStatus("idle");
+      }
+    } finally {
+      if (pendingServerSecurity.current === submittedSecurity) {
+        pendingServerSecurity.current = null;
+      }
+      securityWriteInFlight.current = false;
+    }
+  }
+
+  async function handleRestartSecuritySetup() {
+    if (securityWriteInFlight.current) return;
+    securityWriteInFlight.current = true;
+    setRestartStep("saving");
+    setRestartError(null);
+
+    try {
+      await restartSecuritySetup({});
+      lastServerSecurity.current = {
+        ...lastServerSecurity.current,
+        policy: "legacy_limited",
+      };
+      setPolicy("legacy_limited");
+      setRestartStep("idle");
+      setSaveStatus("idle");
+      setSaveError(null);
+    } catch (error) {
+      setRestartStep("error");
+      setRestartError(
+        ownerSafeError(
+          error,
+          "We couldn’t restart origin discovery. Enforcement is still active.",
+        ),
+      );
+    } finally {
+      securityWriteInFlight.current = false;
+    }
+  }
+
+  return (
+    <Card className="gap-0 py-0">
+      <CardHeader className="border-b py-(--card-spacing)">
+        <CardTitle>Allowed website origins</CardTitle>
+        <CardDescription>
+          Decide exactly which websites can start new support sessions.
+        </CardDescription>
+        <CardAction>
+          <Badge variant={policy === "enforced" ? "secondary" : "destructive"}>
+            {policy === "enforced" ? "Enforced" : "Action needed"}
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="py-(--card-spacing)">
+        <form className="flex flex-col gap-5" onSubmit={(event) => void handleSave(event)}>
+          <FieldGroup>
+            {origins.map((origin, index) => {
+              const inputId = `widget-${origin.id}`;
+
+              return (
+                <Field key={origin.id} data-invalid={visibleSaveStatus === "error"}>
+                  <FieldLabel htmlFor={inputId}>
+                    {index === 0 ? "Website origin" : `Website origin ${index + 1}`}
+                  </FieldLabel>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id={inputId}
+                      name={`widget-origin-${index}`}
+                      className="h-10 font-mono text-sm sm:h-8"
+                      value={origin.value}
+                      aria-invalid={visibleSaveStatus === "error"}
+                      autoCapitalize="none"
+                      autoComplete="url"
+                      inputMode="url"
+                      placeholder="https://support.example.com"
+                      spellCheck={false}
+                      onChange={(event) => updateOrigin(origin.id, event.target.value)}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-lg"
+                      className="size-10 sm:size-8"
+                      aria-label={`Remove ${origin.value || `website origin ${index + 1}`}`}
+                      onClick={() => removeOrigin(origin.id)}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </div>
+                  {index === origins.length - 1 ? (
+                    <FieldDescription>
+                      Use the exact <code className="font-mono">http://</code> or{" "}
+                      <code className="font-mono">https://</code> origin only—no paths,
+                      query strings, or wildcards. Up to 20 origins.
+                    </FieldDescription>
+                  ) : null}
+                </Field>
+              );
+            })}
+
+            {recentOriginState === undefined ? (
+              <FieldDescription className="flex items-center gap-2">
+                <Spinner aria-hidden className="size-3.5" />
+                Loading browser-reported origins…
+              </FieldDescription>
+            ) : recentOrigins.length > 0 ? (
+              <FieldSet>
+                <FieldLegend variant="label">
+                  Unverified browser-reported origins
+                </FieldLegend>
+                <div className="flex flex-col gap-2">
+                  {recentOrigins.map((observation) => (
+                    <Button
+                      key={observation.origin}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-auto max-w-full justify-start py-2 text-left"
+                      disabled={origins.some(
+                        (candidate) =>
+                          candidate.value.trim() === observation.origin,
+                      )}
+                      aria-label={`Add unverified origin ${observation.origin}`}
+                      onClick={() => addRecentOrigin(observation.origin)}
+                    >
+                      <PlusIcon aria-hidden />
+                      <span className="min-w-0">
+                        <span className="block truncate font-mono text-xs">
+                          {observation.origin}
+                        </span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {formatObservationActivity(observation.sessionCount)} · first{" "}
+                          {formatObservationTimestamp(observation.firstSeenAt)} · last{" "}
+                          {formatObservationTimestamp(observation.lastSeenAt)}
+                        </span>
+                      </span>
+                    </Button>
+                  ))}
+                </div>
+                <FieldDescription>
+                  These values are self-reported by browsers and are not verified
+                  installs. In legacy mode, a probe can add a value here. Compare the
+                  origin and activity with your actual site configuration before adding
+                  it.
+                </FieldDescription>
+                {observationWarnings.showCapacity ? (
+                  <FieldDescription className="text-destructive">
+                    The rolling 100-origin safety window is full. A new origin
+                    replaces the least-recently-seen value, so verify your
+                    configuration before enforcing this unverified history.
+                  </FieldDescription>
+                ) : null}
+                {observationWarnings.showTruncation ? (
+                  <FieldDescription className="text-destructive">
+                    More than 20 origins have reported activity. This list shows only
+                    the 20 most recent and is incomplete.
+                  </FieldDescription>
+                ) : null}
+              </FieldSet>
+            ) : policy === "legacy_limited" ? (
+              <FieldDescription>
+                No browser-reported origins have been recorded yet. Open the widget
+                once on each installed customer site; new observations appear here
+                automatically. You can also enter and verify each origin manually.
+              </FieldDescription>
+            ) : null}
+          </FieldGroup>
+
+          {saveError ? <FieldError>{saveError}</FieldError> : null}
+
+          {policy === "enforced" ? (
+            restartStep === "idle" ? (
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Missing an installed site? Restart discovery to temporarily allow
+                  new origins and rebuild the unverified observation list.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  disabled={visibleSaveStatus === "saving"}
+                  onClick={() => {
+                    setRestartStep("confirming");
+                    setRestartError(null);
+                  }}
+                >
+                  Restart origin discovery
+                </Button>
+              </div>
+            ) : (
+              <Alert variant="destructive">
+                <AlertTriangleIcon aria-hidden />
+                <AlertTitle>Temporarily disable origin enforcement?</AlertTitle>
+                <AlertDescription className="space-y-3">
+                  <p>
+                    New widget sessions will be accepted from any browser-reported
+                    origin until you verify the rebuilt list and save it again. The
+                    current unverified observation history will be cleared.
+                  </p>
+                  {restartError ? <p>{restartError}</p> : null}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={
+                        restartStep === "saving" ||
+                        visibleSaveStatus === "saving"
+                      }
+                      onClick={() => void handleRestartSecuritySetup()}
+                    >
+                      {restartStep === "saving" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : null}
+                      {restartStep === "saving"
+                        ? "Restarting"
+                        : "Disable enforcement and clear observations"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={restartStep === "saving"}
+                      onClick={() => {
+                        setRestartStep("idle");
+                        setRestartError(null);
+                      }}
+                    >
+                      Keep enforcement
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )
+          ) : null}
+
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 sm:h-8"
+              disabled={origins.length >= 20 || visibleSaveStatus === "saving"}
+              onClick={addOrigin}
+            >
+              <PlusIcon data-icon="inline-start" />
+              Add origin
+            </Button>
+            <div className="flex items-center justify-end gap-3">
+              <p
+                className={cn(
+                  "text-xs text-muted-foreground",
+                  visibleSaveStatus === "saved" && "text-[var(--status-open)]",
+                  visibleSaveStatus === "error" && "text-destructive",
+                )}
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {visibleSaveStatus === "saving"
+                  ? "Validating and saving…"
+                  : visibleSaveStatus === "saved"
+                    ? "Origins saved and enforced."
+                    : visibleSaveStatus === "error"
+                      ? "Origins were not saved."
+                      : policy === "legacy_limited"
+                        ? "Saving immediately enables enforcement for this exact list."
+                        : "Changes apply after you save; you can correct and resave the list at any time."}
+              </p>
+              <Button
+                type="submit"
+                className="h-10 sm:h-8"
+                disabled={
+                  visibleSaveStatus === "saving" || restartStep === "saving"
+                }
+              >
+                {visibleSaveStatus === "saving" ? (
+                  <Spinner data-icon="inline-start" />
+                ) : visibleSaveStatus === "saved" ? (
+                  <CheckIcon data-icon="inline-start" />
+                ) : (
+                  <Globe2Icon data-icon="inline-start" />
+                )}
+                {saveStatus === "saving"
+                  ? "Saving"
+                  : policy === "legacy_limited"
+                    ? "Save and enforce"
+                    : "Save origins"}
+              </Button>
+            </div>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
 }
 
 function WidgetPreview({
@@ -241,14 +800,21 @@ function WidgetPreview({
 
 export function WidgetSettings({
   preloadedSettings,
+  preloadedSecurity,
   preloadedWorkspace,
 }: {
   preloadedSettings: Preloaded<typeof api.widgetSettings.get>;
+  preloadedSecurity: Preloaded<typeof api.widgetSettings.getSecurity>;
   preloadedWorkspace: Preloaded<typeof api.workspaces.getCurrent>;
 }) {
   const initialSettings =
     usePreloadedAuthQuery(preloadedSettings) ?? defaultWidgetSettings;
   const workspace = usePreloadedAuthQuery(preloadedWorkspace);
+  const securityState = usePreloadedAuthQuery(preloadedSecurity);
+  const security = securityState ?? {
+    allowedOrigins: [],
+    originPolicy: "legacy_limited" as const,
+  };
   const saveSettings = useMutation(api.widgetSettings.save);
   const ensureWorkspace = useMutation(api.workspaces.ensureCurrent);
   const [settings, setSettings] = useState<WidgetSettingsDraft>(() => initialSettings);
@@ -375,6 +941,19 @@ export function WidgetSettings({
         </p>
       </header>
 
+      {security.originPolicy === "legacy_limited" ? (
+        <Alert className="border-destructive/35 bg-destructive/10 py-3">
+          <AlertTriangleIcon aria-hidden />
+          <AlertTitle>New-session protection is still in legacy-limited mode</AlertTitle>
+          <AlertDescription>
+            Your current widget keeps working, but new sessions are not restricted to
+            your websites yet. Verify the browser-reported activity below against your
+            actual installations, add every customer-facing site, and save only when
+            the exact list is complete.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       <div className="flex flex-1 flex-col gap-8 xl:flex-row xl:items-start">
         <div className="flex min-w-0 flex-1 flex-col gap-6">
           <Card className="gap-0 py-0">
@@ -413,6 +992,7 @@ export function WidgetSettings({
                       <FieldLabel htmlFor="widget-display-name">Display name</FieldLabel>
                       <Input
                         id="widget-display-name"
+                        name="widget-display-name"
                         className="h-10 sm:h-8"
                         value={settings.displayName}
                         maxLength={40}
@@ -426,6 +1006,7 @@ export function WidgetSettings({
                       <FieldLabel htmlFor="widget-greeting">Greeting</FieldLabel>
                       <Input
                         id="widget-greeting"
+                        name="widget-greeting"
                         className="h-10 sm:h-8"
                         value={settings.greeting}
                         maxLength={120}
@@ -523,6 +1104,12 @@ export function WidgetSettings({
               </form>
             </CardContent>
           </Card>
+
+          <OriginSecuritySettings
+            initialOrigins={security.allowedOrigins}
+            initialPolicy={security.originPolicy}
+            hasResolvedSecurity={securityState !== undefined}
+          />
 
           <Card className="gap-0 py-0">
             <CardHeader className="border-b py-(--card-spacing)">

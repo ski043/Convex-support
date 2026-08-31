@@ -33,6 +33,7 @@ import { widgetSettingsValidator } from "./schema";
 import { getWidgetOriginPolicy } from "./widgetBootstrap";
 import { verifyWidgetBootstrap } from "../lib/widget-bootstrap-token";
 import { queueVisitorMessageInTransaction } from "./aiAutomation";
+import { recordWidgetOriginObservation } from "./widgetOriginModel";
 
 const defaultWidgetSettings = {
   displayName: "MarshalDesk support",
@@ -61,6 +62,13 @@ const widgetRateLimiter = new RateLimiter(components.rateLimiter, {
     period: HOUR,
     capacity: 500,
     shards: 10,
+  },
+  widgetOriginRediscovery: {
+    kind: "fixed window",
+    rate: 20,
+    period: DAY,
+    capacity: 20,
+    start: 0,
   },
   visitorMessageBurst: {
     kind: "token bucket",
@@ -187,6 +195,30 @@ export const ensureSession = mutation({
         capabilityExpiresAt,
         capabilityExpired: false,
       });
+      const existingObservation = await ctx.db
+        .query("widgetOriginObservations")
+        .withIndex("by_workspaceId_and_origin", (q) =>
+          q
+            .eq("workspaceId", args.workspaceId)
+            .eq("origin", claims.origin),
+        )
+        .unique();
+      if (!existingObservation) {
+        const rediscoveryLimit = await widgetRateLimiter.limit(
+          ctx,
+          "widgetOriginRediscovery",
+          { key: args.workspaceId },
+        );
+        if (rediscoveryLimit.ok) {
+          await recordWidgetOriginObservation(
+            ctx,
+            args.workspaceId,
+            claims.origin,
+            now,
+            false,
+          );
+        }
+      }
       await ctx.scheduler.runAt(
         Math.min(capabilityExpiresAt, now + CAPABILITY_EXPIRY_SCHEDULE_STEP_MS),
         expireCapabilityReference,
@@ -256,6 +288,12 @@ export const ensureSession = mutation({
       sessionCreatedAt: now,
       createdAt: now,
     });
+    await recordWidgetOriginObservation(
+      ctx,
+      args.workspaceId,
+      claims.origin,
+      now,
+    );
     await ctx.scheduler.runAt(claims.expiresAt, deleteBootstrapUseReference, {
       bootstrapUseId,
       nonce: claims.nonce,

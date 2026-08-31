@@ -38,6 +38,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
+const relativeDateFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+});
+const conversationSkeletonIds = ["first", "second", "third", "fourth", "fifth"];
+
 function conversationPreview(conversation: InboxConversation) {
   if (!conversation.lastMessage) return "No messages yet";
   switch (conversation.lastMessage.author) {
@@ -51,6 +57,19 @@ function conversationPreview(conversation: InboxConversation) {
   }
 }
 
+function handlingLabel(conversation: InboxConversation) {
+  switch (conversation.handlingState) {
+    case "ai_handling":
+      return "AI handling";
+    case "needs_human":
+      return "Needs human";
+    case "human_handling":
+      return "Human handling";
+    case "resolved":
+      return "Resolved";
+  }
+}
+
 function relativeTime(timestamp: number, now: number) {
   const elapsedSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
   if (elapsedSeconds < 60) return "now";
@@ -60,17 +79,14 @@ function relativeTime(timestamp: number, now: number) {
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d`;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-  }).format(timestamp);
+  return relativeDateFormatter.format(timestamp);
 }
 
 function ConversationListSkeleton() {
   return (
     <div className="flex flex-col gap-2 p-2 pt-0" aria-label="Loading conversations">
-      {Array.from({ length: 5 }, (_, index) => (
-        <div key={index} className="flex min-h-24 flex-col gap-3 rounded-lg px-3 py-3">
+      {conversationSkeletonIds.map((id) => (
+        <div key={id} className="flex min-h-24 flex-col gap-3 rounded-lg px-3 py-3">
           <div className="flex items-center justify-between gap-3">
             <Skeleton className="h-4 w-28" />
             <Skeleton className="h-3 w-8" />
@@ -93,9 +109,11 @@ export function ConversationListPane({
   query,
   now,
   paginationStatus,
+  attentionFilter,
   onQueryChange,
   onSelect,
   onLoadMore,
+  onAttentionFilterChange,
 }: {
   conversations: InboxConversation[];
   hasAnyConversations: boolean;
@@ -105,9 +123,11 @@ export function ConversationListPane({
   query: string;
   now: number;
   paginationStatus: PaginationStatus;
+  attentionFilter: "all" | "needs_human";
   onQueryChange: (value: string) => void;
   onSelect: (id: ConversationId) => void;
   onLoadMore: () => void;
+  onAttentionFilterChange: (value: "all" | "needs_human") => void;
 }) {
   const searchId = useId();
   const loadingFirstPage = paginationStatus === "LoadingFirstPage";
@@ -136,6 +156,7 @@ export function ConversationListPane({
             <InputGroup className="h-10 md:h-8">
               <InputGroupInput
                 id={searchId}
+                name="conversation-search"
                 aria-label="Search conversations"
                 className="h-full"
                 placeholder="Search conversations"
@@ -148,6 +169,26 @@ export function ConversationListPane({
             </InputGroup>
           </Field>
         </FieldGroup>
+        <div className="mt-2 flex gap-2" aria-label="Conversation attention filter">
+          <Button
+            type="button"
+            size="sm"
+            variant={attentionFilter === "all" ? "secondary" : "ghost"}
+            aria-pressed={attentionFilter === "all"}
+            onClick={() => onAttentionFilterChange("all")}
+          >
+            All
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={attentionFilter === "needs_human" ? "secondary" : "ghost"}
+            aria-pressed={attentionFilter === "needs_human"}
+            onClick={() => onAttentionFilterChange("needs_human")}
+          >
+            Needs human
+          </Button>
+        </div>
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
@@ -160,11 +201,17 @@ export function ConversationListPane({
                 {hasAnyConversations ? <SearchXIcon /> : <InboxIcon />}
               </EmptyMedia>
               <EmptyTitle>
-                {hasAnyConversations ? "No matching conversations" : "No conversations yet"}
+                {hasAnyConversations
+                  ? "No matching conversations"
+                  : attentionFilter === "needs_human"
+                    ? "No conversations need a human"
+                    : "No conversations yet"}
               </EmptyTitle>
               <EmptyDescription>
                 {hasAnyConversations
                   ? "Try a visitor label or a phrase from the latest message."
+                  : attentionFilter === "needs_human"
+                    ? "AI has not handed off any active conversations."
                   : "New visitor messages will appear here in real time."}
               </EmptyDescription>
             </EmptyHeader>
@@ -191,7 +238,7 @@ export function ConversationListPane({
           </Empty>
         ) : (
           <>
-            <ItemGroup className="gap-1 p-2 pt-0" role="listbox" aria-label="Conversations">
+            <ItemGroup className="gap-1 p-2 pt-0">
               {conversations.map((conversation) => {
                 const selected = conversation._id === selectedId;
                 const label = conversationLabel(conversation);
@@ -204,8 +251,7 @@ export function ConversationListPane({
                     render={
                       <button
                         type="button"
-                        role="option"
-                        aria-selected={selected}
+                        aria-pressed={selected}
                         onClick={() => onSelect(conversation._id)}
                       />
                     }
@@ -237,8 +283,16 @@ export function ConversationListPane({
                       <ItemDescription>{conversationPreview(conversation)}</ItemDescription>
                     </ItemContent>
                     <ItemFooter>
-                      <Badge variant={conversation.status === "open" ? "secondary" : "outline"}>
-                        {conversation.status === "open" ? "Open" : "Resolved"}
+                      <Badge
+                        variant={
+                          conversation.handlingState === "needs_human"
+                            ? "destructive"
+                            : conversation.handlingState === "ai_handling"
+                              ? "secondary"
+                              : "outline"
+                        }
+                      >
+                        {handlingLabel(conversation)}
                       </Badge>
                     </ItemFooter>
                   </Item>
