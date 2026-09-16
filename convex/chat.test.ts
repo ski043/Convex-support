@@ -6,6 +6,7 @@ import type { GenericId } from "convex/values";
 import { convexTest } from "convex-test";
 import rateLimiterTest from "@convex-dev/rate-limiter/test";
 import { describe, expect, test, vi } from "vitest";
+import { components } from "./_generated/api";
 import { CAPABILITY_TTL_MS } from "./chatModel";
 import {
   runResponderOrchestration,
@@ -20,6 +21,7 @@ import {
 } from "../lib/widget-bootstrap-token";
 import { WIDGET_HUMAN_REQUEST_MESSAGE } from "../lib/widget-embed-contract";
 import { parseWidgetBootstrapRequest } from "../lib/widget-bootstrap-request";
+import { clearWidgetOriginObservations } from "./widgetOriginModel";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -947,6 +949,18 @@ describe("context, idempotency, and capability expiry", () => {
       await ctx.db.patch("visitors", visitor._id, {
         capabilityExpiresAt: shortExpiry,
       });
+      const observation = await ctx.db
+        .query("widgetOriginObservations")
+        .withIndex("by_workspaceId_and_origin", (q) =>
+          q
+            .eq("workspaceId", workspaceId)
+            .eq("origin", TEST_WIDGET_ORIGIN),
+        )
+        .unique();
+      if (!observation) throw new Error("Expected origin observation");
+      await ctx.db.patch("widgetOriginObservations", observation._id, {
+        lastSeenAt: 1_000,
+      });
     });
 
     await t.mutation(ensureSession, {
@@ -965,6 +979,18 @@ describe("context, idempotency, and capability expiry", () => {
       return visitor?.capabilityExpiresAt ?? 0;
     });
     expect(renewedExpiry).toBeGreaterThanOrEqual(Date.now() + CAPABILITY_TTL_MS - 1_000);
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_origin", (q) =>
+            q
+              .eq("workspaceId", workspaceId)
+              .eq("origin", TEST_WIDGET_ORIGIN),
+          )
+          .unique(),
+      ),
+    ).toMatchObject({ sessionCount: 1, lastSeenAt: 1_000 });
 
     await t.run(async (ctx) => {
       const visitor = await ctx.db
@@ -996,6 +1022,81 @@ describe("context, idempotency, and capability expiry", () => {
         context: emptyContext,
       }),
     ).rejects.toThrow(/Invalid or expired visitor capability/);
+  });
+
+  test("resumed capabilities repopulate cleared origin discovery without counting a bootstrap", async () => {
+    const t = makeTestBackend();
+    const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
+    const session = await createVisitor(t, workspaceId);
+    await t.run(async (ctx) =>
+      clearWidgetOriginObservations(ctx, workspaceId),
+    );
+
+    await t.mutation(ensureSession, {
+      workspaceId,
+      bootstrapToken: await createBootstrap(workspaceId),
+      token: session.token,
+      context: emptyContext,
+    });
+
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_origin", (q) =>
+            q
+              .eq("workspaceId", workspaceId)
+              .eq("origin", TEST_WIDGET_ORIGIN),
+          )
+          .unique(),
+      ),
+    ).toMatchObject({ sessionCount: 0 });
+  });
+
+  test("rate-limits origin rediscovery without blocking capability renewal", async () => {
+    const t = makeTestBackend();
+    const workspaceId = await createWorkspace(t, ownerAIdentity.tokenIdentifier);
+    const session = await createVisitor(t, workspaceId);
+    await t.run(async (ctx) => {
+      await clearWidgetOriginObservations(ctx, workspaceId);
+      const exhausted = await ctx.runMutation(
+        components.rateLimiter.lib.rateLimit,
+        {
+          name: "widgetOriginRediscovery",
+          key: workspaceId,
+          count: 20,
+          config: {
+            kind: "fixed window",
+            rate: 20,
+            period: 24 * 60 * 60_000,
+            capacity: 20,
+            start: 0,
+          },
+        },
+      );
+      expect(exhausted.ok).toBe(true);
+    });
+
+    await expect(
+      t.mutation(ensureSession, {
+        workspaceId,
+        bootstrapToken: await createBootstrap(workspaceId),
+        token: session.token,
+        context: emptyContext,
+      }),
+    ).resolves.toEqual(session);
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db
+          .query("widgetOriginObservations")
+          .withIndex("by_workspaceId_and_origin", (q) =>
+            q
+              .eq("workspaceId", workspaceId)
+              .eq("origin", TEST_WIDGET_ORIGIN),
+          )
+          .unique(),
+      ),
+    ).toBeNull();
   });
 
   test("the scheduled expiry invalidates reactive visitor reads", async () => {

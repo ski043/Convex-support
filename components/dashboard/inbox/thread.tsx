@@ -1,8 +1,8 @@
 "use client";
 
-import type { PaginationStatus } from "convex/react";
-import { MessageSquareTextIcon } from "lucide-react";
-import { Fragment } from "react";
+import { useQuery, type PaginationStatus } from "convex/react";
+import { BookOpenIcon, ChevronDownIcon, MessageSquareTextIcon } from "lucide-react";
+import { Fragment, useState } from "react";
 import type { InboxMessage } from "@/components/dashboard/inbox/types";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,108 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { TypingIndicator } from "@/components/ui/typing-indicator";
+import { api } from "@/convex/_generated/api";
+
+const messageTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
+const messageDateFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "long",
+  day: "numeric",
+});
+const messageDateWithYearFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+});
+
+function EvidenceDisclosure({ messageId }: { messageId: InboxMessage["_id"] }) {
+  const [open, setOpen] = useState(false);
+  const citations = useQuery(
+    api.inbox.listCitations,
+    open ? { messageId } : "skip",
+  );
+  const regionId = `evidence-${messageId}`;
+
+  return (
+    <div className="mt-1 max-w-xl">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 px-2 text-xs text-muted-foreground"
+        aria-expanded={open}
+        aria-controls={regionId}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <BookOpenIcon data-icon="inline-start" />
+        Evidence for this AI reply
+        <ChevronDownIcon
+          data-icon="inline-end"
+          className={
+            open
+              ? "rotate-180 transition-transform motion-reduce:transition-none"
+              : "transition-transform motion-reduce:transition-none"
+          }
+        />
+      </Button>
+      {open ? (
+        <div
+          id={regionId}
+          className="mt-2 space-y-2 rounded-lg border border-border bg-muted/40 p-3 text-xs"
+          aria-live="polite"
+        >
+          {citations === undefined ? (
+            <p className="text-muted-foreground">Loading evidence…</p>
+          ) : citations.length === 0 ? (
+            <p className="text-muted-foreground">
+              This message is a handoff acknowledgement and has no cited source.
+            </p>
+          ) : (
+            citations.map((citation) => (
+              <article
+                key={`${citation.segmentIndex ?? "legacy"}:${citation.documentTitle}:${citation.pageNumber ?? ""}:${citation.heading ?? ""}:${citation.excerpt}`}
+                className="space-y-2"
+              >
+                <p className="font-medium text-foreground">
+                  {citation.segmentIndex === undefined
+                    ? "Source"
+                    : `Answer segment ${citation.segmentIndex + 1}`}
+                  {" · "}
+                  {citation.documentTitle}
+                  {citation.pageNumber ? ` · page ${citation.pageNumber}` : ""}
+                  {citation.heading ? ` · ${citation.heading}` : ""}
+                </p>
+                {citation.segmentText ? (
+                  <p className="leading-relaxed text-foreground">
+                    {citation.segmentText}
+                  </p>
+                ) : null}
+                {citation.supportingQuote ? (
+                  <blockquote className="border-l-2 border-primary/40 pl-2 leading-relaxed text-muted-foreground">
+                    Exact source match: “{citation.supportingQuote}”
+                  </blockquote>
+                ) : (
+                  <p className="leading-relaxed text-muted-foreground">
+                    {citation.excerpt}
+                  </p>
+                )}
+                {citation.supportingQuote &&
+                citation.excerpt !== citation.supportingQuote ? (
+                  <details className="text-muted-foreground">
+                    <summary className="cursor-pointer">Source context</summary>
+                    <p className="mt-1 leading-relaxed">{citation.excerpt}</p>
+                  </details>
+                ) : null}
+              </article>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function dateKey(timestamp: number) {
   const date = new Date(timestamp);
@@ -45,18 +147,14 @@ function dateLabel(timestamp: number) {
 
   if (date.toDateString() === today.toDateString()) return "Today";
   if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "long",
-    day: "numeric",
-    year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
-  }).format(date);
+  return (date.getFullYear() === today.getFullYear()
+    ? messageDateFormatter
+    : messageDateWithYearFormatter
+  ).format(date);
 }
 
 function messageTime(timestamp: number) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
+  return messageTimeFormatter.format(timestamp);
 }
 
 function messagePresentation(
@@ -221,6 +319,9 @@ export function Thread({
                           <BubbleContent>{message.body}</BubbleContent>
                         </Bubble>
                         <MessageFooter>{messageTime(message.createdAt)}</MessageFooter>
+                        {message.author === "assistant" ? (
+                          <EvidenceDisclosure messageId={message._id} />
+                        ) : null}
                       </MessageContent>
                     </Message>
                   </MessageScrollerItem>
