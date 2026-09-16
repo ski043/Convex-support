@@ -18,6 +18,30 @@ import {
   conversationItemValidator,
   messageItemValidator,
 } from "./chatValidators";
+import {
+  invalidateForOwnerTakeoverInTransaction,
+  invalidateForResolveInTransaction,
+  mirrorCanonicalMessageInTransaction,
+} from "./aiAutomation";
+
+async function automationSummary(
+  ctx: Parameters<typeof requireOwnerWorkspace>[0],
+  conversationId: Parameters<typeof requireOwnedConversation>[1],
+) {
+  const state = await ctx.db
+    .query("aiConversationStates")
+    .withIndex("by_conversationId", (q) => q.eq("conversationId", conversationId))
+    .unique();
+  if (!state) return undefined;
+  const run = state.activeRunId ? await ctx.db.get("aiRuns", state.activeRunId) : null;
+  return {
+    mode: state.mode,
+    attention: state.attention,
+    isAiTyping:
+      state.mode === "ai" &&
+      (run?.status === "queued" || run?.status === "running"),
+  };
+}
 
 export const listConversations = query({
   args: { paginationOpts: paginationOptsValidator },
@@ -39,7 +63,11 @@ export const listConversations = query({
         if (!visitor || visitor.workspaceId !== workspace._id) {
           throw chatError("CONVERSATION_NOT_FOUND", "Conversation not found.");
         }
-        return toConversationItem(conversation, visitor);
+        return toConversationItem(
+          conversation,
+          visitor,
+          await automationSummary(ctx, conversation._id),
+        );
       }),
     );
     return { ...result, page };
@@ -58,7 +86,100 @@ export const getConversation = query({
     if (!visitor || visitor.workspaceId !== workspace._id) {
       throw chatError("CONVERSATION_NOT_FOUND", "Conversation not found.");
     }
-    return toConversationItem(conversation, visitor);
+    return toConversationItem(
+      conversation,
+      visitor,
+      await automationSummary(ctx, conversation._id),
+    );
+  },
+});
+
+export const listNeedsHuman = query({
+  args: { paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(conversationItemValidator),
+  handler: async (ctx, args) => {
+    validatePageSize(args.paginationOpts);
+    const workspace = await requireOwnerWorkspace(ctx);
+    const result = await ctx.db
+      .query("aiConversationStates")
+      .withIndex("by_workspaceId_and_attention_and_updatedAt", (q) =>
+        q.eq("workspaceId", workspace._id).eq("attention", "needs_human"),
+      )
+      .order("desc")
+      .paginate(args.paginationOpts);
+    const page = await Promise.all(
+      result.page.map(async (state) => {
+        const conversation = await ctx.db.get("conversations", state.conversationId);
+        if (!conversation || conversation.workspaceId !== workspace._id) {
+          throw chatError("CONVERSATION_NOT_FOUND", "Conversation not found.");
+        }
+        const visitor = await ctx.db.get("visitors", conversation.visitorId);
+        if (!visitor || visitor.workspaceId !== workspace._id) {
+          throw chatError("CONVERSATION_NOT_FOUND", "Conversation not found.");
+        }
+        const run = state.activeRunId ? await ctx.db.get("aiRuns", state.activeRunId) : null;
+        return toConversationItem(conversation, visitor, {
+          mode: state.mode,
+          attention: state.attention,
+          isAiTyping:
+            state.mode === "ai" &&
+            (run?.status === "queued" || run?.status === "running"),
+        });
+      }),
+    );
+    return { ...result, page };
+  },
+});
+
+export const listCitations = query({
+  args: { messageId: v.id("messages") },
+  returns: v.array(
+    v.object({
+      documentTitle: v.string(),
+      pageNumber: v.optional(v.number()),
+      heading: v.optional(v.string()),
+      segmentIndex: v.optional(v.number()),
+      segmentText: v.optional(v.string()),
+      supportingQuote: v.optional(v.string()),
+      excerpt: v.string(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get("messages", args.messageId);
+    if (!message) throw chatError("MESSAGE_NOT_FOUND", "Message not found.");
+    const { workspace } = await requireOwnedConversation(ctx, message.conversationId);
+    if (message.workspaceId !== workspace._id || message.author !== "assistant") {
+      throw chatError("MESSAGE_NOT_FOUND", "Message not found.");
+    }
+    const citations = await ctx.db
+      .query("aiCitations")
+      .withIndex("by_workspaceId_and_messageId", (q) =>
+        q.eq("workspaceId", workspace._id).eq("messageId", message._id),
+      )
+      .take(20);
+    return citations
+      .map((citation) => ({
+        documentTitle: citation.documentTitle,
+        ...(citation.pageNumber === undefined
+          ? {}
+          : { pageNumber: citation.pageNumber }),
+        ...(citation.heading === undefined ? {} : { heading: citation.heading }),
+        ...(citation.segmentIndex === undefined
+          ? {}
+          : { segmentIndex: citation.segmentIndex }),
+        ...(citation.segmentText === undefined
+          ? {}
+          : { segmentText: citation.segmentText }),
+        ...(citation.supportingQuote === undefined
+          ? {}
+          : { supportingQuote: citation.supportingQuote }),
+        excerpt: citation.excerpt,
+      }))
+      .sort(
+        (left, right) =>
+          (left.segmentIndex ?? Number.MAX_SAFE_INTEGER) -
+          (right.segmentIndex ?? Number.MAX_SAFE_INTEGER),
+      );
   },
 });
 
@@ -115,6 +236,7 @@ export const sendReply = mutation({
       );
     }
 
+    await invalidateForOwnerTakeoverInTransaction(ctx, conversation._id);
     const now = Date.now();
     const message = await insertMessage(
       ctx,
@@ -132,6 +254,7 @@ export const sendReply = mutation({
       lastMessageSequence: message.sequence,
       unreadCount: 0,
     });
+    await mirrorCanonicalMessageInTransaction(ctx, message._id);
     return toMessageItem(message);
   },
 });
@@ -162,6 +285,7 @@ export const resolve = mutation({
       throw chatError("CONVERSATION_RESOLVED", "Conversation is already resolved.");
     }
 
+    await invalidateForResolveInTransaction(ctx, conversation._id);
     const now = Date.now();
     const message = await insertMessage(
       ctx,
@@ -181,6 +305,7 @@ export const resolve = mutation({
       lastMessageSequence: message.sequence,
       unreadCount: 0,
     });
+    await mirrorCanonicalMessageInTransaction(ctx, message._id);
     return toMessageItem(message);
   },
 });

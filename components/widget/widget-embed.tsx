@@ -15,10 +15,12 @@ import {
   ChevronDownIcon,
   MessageCircleIcon,
   SendIcon,
+  UserRoundIcon,
 } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -69,9 +71,11 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { useTypingPresence } from "@/hooks/use-typing-presence";
 import {
   WIDGET_BOOTSTRAP_MESSAGE_TYPE,
+  WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE,
   WIDGET_CLOSED_FRAME_SIZE,
   WIDGET_CONTEXT_MESSAGE_TYPE,
   WIDGET_FRAME_MESSAGE_TYPE,
+  WIDGET_HUMAN_REQUEST_MESSAGE,
   WIDGET_LAUNCHER_SIZE,
   WIDGET_MESSAGE_MARKER,
   WIDGET_OPEN_FRAME_HEIGHT,
@@ -95,7 +99,7 @@ type WidgetConfig = {
 type WidgetMessage = {
   _id: string;
   sequence: number;
-  author: "visitor" | "owner" | "system";
+  author: "visitor" | "owner" | "assistant" | "system";
   body: string;
   createdAt: number;
 };
@@ -123,6 +127,7 @@ type WidgetChatApi = {
       "public",
       {
         workspaceId: string;
+        bootstrapToken: string;
         token?: string;
         context: WidgetContextInput;
       },
@@ -137,6 +142,12 @@ type WidgetChatApi = {
         context: WidgetContextInput;
       },
       null
+    >;
+    getAutomationState: FunctionReference<
+      "query",
+      "public",
+      { workspaceId: string; token: string },
+      { isAiTyping: boolean; handling: "ai" | "human"; needsHuman: boolean }
     >;
     listMessages: FunctionReference<
       "query",
@@ -186,6 +197,10 @@ const themeColors: Record<WidgetTheme, string> = {
   amber: "#70400c",
   zinc: "#3f3f46",
 };
+const widgetTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
 
 const emptyPageContext: WidgetPageContext = {
   pageUrl: null,
@@ -305,6 +320,31 @@ function cleanPlatformContext(value: unknown): PlatformContext | null {
   };
 }
 
+async function requestWidgetBootstrapRenewal(
+  workspaceId: Id<"workspaces">,
+  parentOrigin: string,
+  capabilityToken: string,
+) {
+  const response = await fetch("/api/widget-bootstrap", {
+    method: "POST",
+    credentials: "omit",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, parentOrigin, capabilityToken }),
+  });
+  if (!response.ok) throw new Error("Widget bootstrap renewal was rejected.");
+  const result: unknown = await response.json();
+  if (
+    !isRecord(result) ||
+    typeof result.bootstrapToken !== "string" ||
+    !result.bootstrapToken ||
+    result.bootstrapToken.length > 4_096
+  ) {
+    throw new Error("Widget bootstrap renewal was invalid.");
+  }
+  return result.bootstrapToken;
+}
+
 function newClientMessageId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
 
@@ -323,10 +363,7 @@ function newClientMessageId() {
 
 function formatTime(timestamp: number) {
   try {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-    }).format(new Date(timestamp));
+    return widgetTimeFormatter.format(new Date(timestamp));
   } catch {
     return "";
   }
@@ -398,6 +435,7 @@ export function WidgetEmbed({
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [hostToken, setHostToken] = useState<string | null | undefined>();
+  const [hostBootstrapToken, setHostBootstrapToken] = useState<string>();
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>("waiting");
   const [pageContext, setPageContext] =
@@ -408,6 +446,8 @@ export function WidgetEmbed({
   const [platformContext, setPlatformContext] =
     useState<PlatformContext | null | undefined>();
   const sessionInFlight = useRef(false);
+  const bootstrapInFlight = useRef(false);
+  const bootstrapTimeout = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
   const lastSentContext = useRef("");
   const retryMessage = useRef<{ body: string; clientMessageId: string } | null>(
@@ -421,6 +461,10 @@ export function WidgetEmbed({
   const ensureSession = useMutation(widgetChatApi.ensureSession);
   const updateContext = useMutation(widgetChatApi.updateContext);
   const sendMessage = useMutation(widgetChatApi.sendMessage);
+  const automationState = useQuery_experimental({
+    query: widgetChatApi.getAutomationState,
+    args: sessionToken ? { workspaceId, token: sessionToken } : "skip",
+  });
   const messagesState = usePaginatedQuery_experimental({
     query: widgetChatApi.listMessages,
     args: sessionToken ? { workspaceId, token: sessionToken } : "skip",
@@ -453,6 +497,82 @@ export function WidgetEmbed({
     window.parent.postMessage(message, parentOrigin);
   }, [parentOrigin]);
 
+  const refreshBootstrapToken = useCallback((capabilityToken?: string | null) => {
+    if (bootstrapInFlight.current) return;
+    const renewalToken =
+      capabilityToken === undefined ? hostToken : capabilityToken;
+    bootstrapInFlight.current = true;
+    if (bootstrapTimeout.current) {
+      window.clearTimeout(bootstrapTimeout.current);
+    }
+    setHostBootstrapToken(undefined);
+    setSessionStatus("waiting");
+    postToParent({
+      marker: WIDGET_MESSAGE_MARKER,
+      type: WIDGET_BOOTSTRAP_REQUEST_MESSAGE_TYPE,
+    });
+    bootstrapTimeout.current = window.setTimeout(() => {
+      bootstrapTimeout.current = undefined;
+      if (!bootstrapInFlight.current) return;
+      if (!renewalToken) {
+        bootstrapInFlight.current = false;
+        if (mounted.current) setSessionStatus("error");
+        return;
+      }
+      void requestWidgetBootstrapRenewal(
+        workspaceId,
+        parentOrigin,
+        renewalToken,
+      )
+        .then((bootstrapToken) => {
+          if (!mounted.current || !bootstrapInFlight.current) return;
+          bootstrapInFlight.current = false;
+          setHostBootstrapToken(bootstrapToken);
+          if (sessionStatus !== "ready") setSessionStatus("waiting");
+        })
+        .catch(() => {
+          if (!bootstrapInFlight.current) return;
+          bootstrapInFlight.current = false;
+          if (mounted.current) setSessionStatus("error");
+        });
+    }, 5_000);
+  }, [hostToken, parentOrigin, postToParent, sessionStatus, workspaceId]);
+
+  const handleBootstrapMessage = useEffectEvent(
+    (data: Record<string, unknown>) => {
+      const incomingToken = data.token;
+      if (
+        incomingToken !== null &&
+        (typeof incomingToken !== "string" ||
+          !incomingToken ||
+          incomingToken.length > 4096)
+      ) {
+        return;
+      }
+      const context = cleanPageContext(data.context, parentOrigin);
+      if (!context) return;
+      setHostToken(incomingToken);
+      setPageContext(context);
+      if (
+        typeof data.bootstrapToken === "string" &&
+        data.bootstrapToken &&
+        data.bootstrapToken.length <= 4_096
+      ) {
+        if (bootstrapTimeout.current) {
+          window.clearTimeout(bootstrapTimeout.current);
+          bootstrapTimeout.current = undefined;
+        }
+        bootstrapInFlight.current = false;
+        setHostBootstrapToken(data.bootstrapToken);
+        if (sessionStatus !== "ready") {
+          setSessionStatus("waiting");
+        }
+      } else {
+        refreshBootstrapToken(incomingToken);
+      }
+    },
+  );
+
   useEffect(() => {
     let cancelled = false;
 
@@ -480,6 +600,10 @@ export function WidgetEmbed({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (bootstrapTimeout.current) {
+        window.clearTimeout(bootstrapTimeout.current);
+        bootstrapTimeout.current = undefined;
+      }
     };
   }, []);
 
@@ -496,16 +620,7 @@ export function WidgetEmbed({
       }
 
       if (data.type === WIDGET_BOOTSTRAP_MESSAGE_TYPE) {
-        if (
-          data.token !== null &&
-          (typeof data.token !== "string" || !data.token || data.token.length > 4096)
-        ) {
-          return;
-        }
-        const context = cleanPageContext(data.context, parentOrigin);
-        if (!context) return;
-        setHostToken(data.token);
-        setPageContext(context);
+        handleBootstrapMessage(data);
         return;
       }
 
@@ -537,6 +652,7 @@ export function WidgetEmbed({
     if (
       !config ||
       hostToken === undefined ||
+      !hostBootstrapToken ||
       !visitorContext ||
       sessionStatus !== "waiting" ||
       sessionInFlight.current
@@ -552,6 +668,7 @@ export function WidgetEmbed({
         try {
           result = await ensureSession({
             workspaceId,
+            bootstrapToken: hostBootstrapToken,
             ...(hostToken ? { token: hostToken } : {}),
             context: visitorContext,
           });
@@ -559,6 +676,7 @@ export function WidgetEmbed({
           if (!hostToken) throw error;
           result = await ensureSession({
             workspaceId,
+            bootstrapToken: hostBootstrapToken,
             context: visitorContext,
           });
         }
@@ -583,6 +701,7 @@ export function WidgetEmbed({
     ensureSession,
     config,
     hostToken,
+    hostBootstrapToken,
     postToParent,
     sessionStatus,
     visitorContext,
@@ -615,10 +734,8 @@ export function WidgetEmbed({
     }).catch(() => undefined);
   }, [open, sessionStatus, sessionToken, updateContext, visitorContext, workspaceId]);
 
-  async function submitMessage(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function sendCanonicalMessage(body: string, clearDraft: boolean) {
     typingPresence.clearTyping();
-    const body = draft.trim();
     if (!body || !sessionToken || sending) return;
     const clientMessageId =
       retryMessage.current?.body === body
@@ -637,12 +754,17 @@ export function WidgetEmbed({
         context: visitorContext ?? emptyPageContext,
       });
       retryMessage.current = null;
-      setDraft("");
+      if (clearDraft) setDraft("");
     } catch {
       setSendError("Your message wasn’t sent. Please try again.");
     } finally {
       setSending(false);
     }
+  }
+
+  async function submitMessage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await sendCanonicalMessage(draft.trim(), true);
   }
 
   const chronologicalMessages = useMemo(
@@ -669,6 +791,8 @@ export function WidgetEmbed({
     Boolean(config) &&
     sessionStatus === "ready" &&
     messagesState.status === "success";
+  const humanAlreadyRequested =
+    automationState.status === "success" && automationState.data.needsHuman;
   const widgetStyle = {
     "--primary": themeColors[theme],
     "--ring": themeColors[theme],
@@ -692,7 +816,7 @@ export function WidgetEmbed({
         title="Couldn’t connect"
         description="Reload the page or try connecting again."
         onRetry={() => {
-          setSessionStatus("waiting");
+          refreshBootstrapToken();
         }}
       />
     );
@@ -769,6 +893,11 @@ export function WidgetEmbed({
 
                 const fromVisitor = message.author === "visitor";
                 const align = fromVisitor ? "end" : "start";
+                const senderLabel = fromVisitor
+                  ? "You"
+                  : message.author === "assistant"
+                    ? `${displayName} · AI`
+                    : displayName;
                 return (
                   <MessageScrollerItem
                     key={message._id}
@@ -778,7 +907,7 @@ export function WidgetEmbed({
                     <Message align={align}>
                       <MessageContent>
                         <MessageHeader>
-                          {fromVisitor ? "You" : displayName}
+                          {senderLabel}
                         </MessageHeader>
                         <Bubble
                           variant={fromVisitor ? "default" : "muted"}
@@ -797,6 +926,14 @@ export function WidgetEmbed({
                 <TypingIndicator
                   messageId="widget-owner-typing"
                   label={`${typingOwnerName} is typing…`}
+                />
+              ) : null}
+              {!typingPresence.ownerTyping &&
+              automationState.status === "success" &&
+              automationState.data.isAiTyping ? (
+                <TypingIndicator
+                  messageId="widget-ai-typing"
+                  label={`${displayName} AI is preparing a reply…`}
                 />
               ) : null}
             </MessageScrollerContent>
@@ -818,9 +955,8 @@ export function WidgetEmbed({
       {open ? (
         <section
           id="marshaldesk-chat-panel"
-          role="dialog"
           aria-label={`Chat with ${displayName}`}
-          className="pointer-events-auto mb-3 flex h-[min(560px,calc(100dvh-100px))] w-[min(380px,calc(100vw-32px))] min-h-0 flex-col overflow-hidden rounded-2xl border bg-background text-foreground"
+          className="pointer-events-auto mb-3 flex h-[min(560px,calc(100dvh-100px))] w-[min(380px,calc(100vw-32px))] min-h-0 flex-col overflow-hidden overscroll-contain rounded-2xl border bg-background text-foreground"
         >
           <header className="flex min-h-16 items-center gap-3 bg-primary px-4 py-3 text-primary-foreground">
             <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary-foreground/15">
@@ -852,12 +988,32 @@ export function WidgetEmbed({
           >
             <FieldGroup>
               <Field data-invalid={Boolean(sendError)}>
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={!canSend || sending || humanAlreadyRequested}
+                    onClick={() => {
+                      void sendCanonicalMessage(
+                        WIDGET_HUMAN_REQUEST_MESSAGE,
+                        false,
+                      );
+                    }}
+                  >
+                    <UserRoundIcon data-icon="inline-start" />
+                    {humanAlreadyRequested
+                      ? "Human requested"
+                      : "Talk to a human"}
+                  </Button>
+                </div>
                 <FieldLabel htmlFor="marshaldesk-message" className="sr-only">
                   Message
                 </FieldLabel>
                 <InputGroup className="h-11 has-disabled:opacity-100">
                   <InputGroupInput
                     id="marshaldesk-message"
+                    name="marshaldesk-message"
                     value={draft}
                     maxLength={4000}
                     placeholder={canSend ? "Type your message…" : "Connecting…"}

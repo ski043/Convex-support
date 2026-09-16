@@ -108,6 +108,7 @@ export default defineSchema({
       originPolicy: v.optional(
         v.union(v.literal("legacy_limited"), v.literal("enforced")),
       ),
+      securityUpdatedAt: v.optional(v.number()),
       updatedAt: v.number(),
     }),
   )
@@ -324,4 +325,13 @@ export default defineSchema({
     .index("by_nonce", ["nonce"])
     .index("by_expiresAt", ["expiresAt"])
     .index("by_workspaceId_and_createdAt", ["workspaceId", "createdAt"]),
+  widgetOriginObservations: defineTable({
+    workspaceId: v.id("workspaces"),
+    origin: v.string(),
+    sessionCount: v.number(),
+    firstSeenAt: v.number(),
+    lastSeenAt: v.number(),
+  })
+    .index("by_workspaceId_and_origin", ["workspaceId", "origin"])
+    .index("by_workspaceId_and_lastSeenAt", ["workspaceId", "lastSeenAt"]),
 });

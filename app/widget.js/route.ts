@@ -3,6 +3,7 @@ const loaderSource = String.raw`(function () {
 
   var MESSAGE_MARKER = "marshaldesk-widget-v1";
   var BOOTSTRAP_TYPE = "bootstrap";
+  var BOOTSTRAP_REQUEST_TYPE = "bootstrap-request";
   var CONTEXT_TYPE = "context";
   var READY_TYPE = "ready";
   var TOKEN_TYPE = "token";
@@ -108,6 +109,7 @@ const loaderSource = String.raw`(function () {
   var parentOrigin = location.origin;
   var cookieName = COOKIE_PREFIX + cookieSuffix(workspaceId);
   var token = readCookie(cookieName);
+  var bootstrapToken = null;
   var iframe = document.createElement("iframe");
   var lastFrame = { position: "bottomRight", width: 88, height: 88 };
   var lastContext = "";
@@ -156,6 +158,7 @@ const loaderSource = String.raw`(function () {
       marker: MESSAGE_MARKER,
       type: BOOTSTRAP_TYPE,
       token: typeof token === "string" && token ? token : null,
+      bootstrapToken: bootstrapToken,
       context: pageContext()
     });
   }
@@ -228,6 +231,11 @@ const loaderSource = String.raw`(function () {
       return;
     }
 
+    if (data.type === BOOTSTRAP_REQUEST_TYPE) {
+      requestBootstrap(1, false);
+      return;
+    }
+
     if (data.type === TOKEN_TYPE) {
       if (typeof data.token !== "string" || !data.token) return;
       token = data.token;
@@ -282,11 +290,58 @@ const loaderSource = String.raw`(function () {
     (document.body || document.documentElement).appendChild(iframe);
   }
 
-  if (document.body) {
-    mount();
-  } else {
-    document.addEventListener("DOMContentLoaded", mount, { once: true });
+  function mountWhenReady() {
+    if (document.body) {
+      mount();
+    } else {
+      document.addEventListener("DOMContentLoaded", mount, { once: true });
+    }
   }
+
+  function requestBootstrap(attempt, mountAfterSuccess) {
+    fetch(widgetOrigin + "/api/widget-bootstrap", {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: workspaceId })
+    })
+      .then(function (response) {
+        if (!response.ok) throw new Error("bootstrap rejected");
+        return response.json();
+      })
+      .then(function (result) {
+        if (
+          !result ||
+          typeof result.bootstrapToken !== "string" ||
+          !result.bootstrapToken ||
+          result.bootstrapToken.length > 4096
+        ) {
+          throw new Error("invalid bootstrap");
+        }
+        bootstrapToken = result.bootstrapToken;
+        if (mountAfterSuccess) {
+          mountWhenReady();
+        } else {
+          postBootstrap();
+        }
+      })
+      .catch(function (error) {
+        if (attempt < 3) {
+          window.setTimeout(function () {
+            requestBootstrap(attempt + 1, mountAfterSuccess);
+          }, attempt * 300);
+          return;
+        }
+        window[BOOT_FLAG] = false;
+        if (window.console && typeof window.console.warn === "function") {
+          window.console.warn("Support widget bootstrap failed after 3 attempts.", error);
+        }
+      });
+  }
+
+  requestBootstrap(1, true);
 })();`;
 
 export async function GET() {

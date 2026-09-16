@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { AiSettingsCard } from "@/components/dashboard/knowledge/ai-settings-card";
 import { KnowledgeBase } from "@/components/dashboard/knowledge/knowledge-base";
 import { api } from "@/convex/_generated/api";
 import { preloadAuthQuery } from "@/lib/auth-server";
@@ -9,7 +10,14 @@ export const metadata: Metadata = {
 };
 
 export default async function KnowledgePage() {
-  const preloadedDocuments = await preloadAuthQuery(api.knowledge.list);
+  const [preloadedDocuments, preloadedAiSettings] = await Promise.all([
+    preloadAuthQuery(api.knowledge.list),
+    preloadAuthQuery(api.aiAutomation.getAiSettings),
+  ]);
 
-  return <KnowledgeBase preloadedDocuments={preloadedDocuments} />;
+  return (
+    <KnowledgeBase preloadedDocuments={preloadedDocuments}>
+      <AiSettingsCard preloadedSettings={preloadedAiSettings} />
+    </KnowledgeBase>
+  );
 }
